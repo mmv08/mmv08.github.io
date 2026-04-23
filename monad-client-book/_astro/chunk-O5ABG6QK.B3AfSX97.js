@@ -1,7 +1,7 @@
 import { m as l, i as n, ao as o, r as d, f as y } from "./mermaid.esm.min.OvpNIYUj.js"
 var x = d(y()),
   p = l((a, t) => {
-    let e = a.append("rect")
+    const e = a.append("rect")
     if (
       (e.attr("x", t.x),
       e.attr("y", t.y),
