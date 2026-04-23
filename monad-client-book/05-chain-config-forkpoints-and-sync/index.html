@@ -1,0 +1,173 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="generator" content="Astro v6.1.9"><title>Chapter 5: Chain Config, Forkpoints, Restart, and Sync</title><meta property="og:title" content="Chapter 5: Chain Config, Forkpoints, Restart, and Sync"><meta property="og:image" content="https://mmv08.github.io/monad-client-book/og-image.png"><link rel="stylesheet" href="/monad-client-book/_astro/book.np3A6oR_.css"></head> <body data-has-toc="true" data-has-mermaid="true"> <button class="menu-toggle" id="menuToggle" aria-label="Toggle menu">☰</button> <div class="page "> <aside class="sidebar" id="sidebar"> <p class="sidebar-title"><a href="/monad-client-book/">Monad Client Book</a></p> <nav> <ul> <li> <a href="/monad-client-book/00-introduction/" class> The Monad Client: A Bottom-Up Code Walkthrough </a> </li><li> <a href="/monad-client-book/01-foundation-types-and-crypto/" class> Chapter 1: Foundation — Types and Cryptography </a> </li><li> <a href="/monad-client-book/02-validators-epochs-and-leader-election/" class> Chapter 2: Validators, Epochs, and Leader Election </a> </li><li> <a href="/monad-client-book/03-consensus-data-structures/" class> Chapter 3: Consensus Data Structures </a> </li><li> <a href="/monad-client-book/04-the-consensus-protocol/" class> Chapter 4: The Consensus Protocol </a> </li><li> <a href="/monad-client-book/05-chain-config-forkpoints-and-sync/" class="active"> Chapter 5: Chain Config, Forkpoints, Restart, and Sync </a> </li><li> <a href="/monad-client-book/06-execution-and-evm/" class> Chapter 6: Execution Boundary and Process Architecture </a> </li><li> <a href="/monad-client-book/07-execution-data-model-and-state-transition/" class> Chapter 7: Execution Data Model and State Transition </a> </li><li> <a href="/monad-client-book/08-execution-services-triedb-events-and-hosted-apis/" class> Chapter 8: Execution Services — Triedb, Event Rings, and Hosted APIs </a> </li><li> <a href="/monad-client-book/09-transaction-pool-and-fee-market/" class> Chapter 9: Transaction Pool and Fee Market </a> </li><li> <a href="/monad-client-book/10-networking-and-p2p/" class> Chapter 10: Networking and Peer-to-Peer Communication </a> </li><li> <a href="/monad-client-book/11-storage-and-state/" class> Chapter 11: Storage and State </a> </li><li> <a href="/monad-client-book/12-node-assembly-and-rpc/" class> Chapter 12: Node Assembly and RPC </a> </li><li> <a href="/monad-client-book/13-failure-modes-and-defenses/" class> Chapter 13: Failure Modes and Defenses </a> </li><li> <a href="/monad-client-book/14-testing-and-simulation/" class> Chapter 14: Testing and Simulation </a> </li><li> <a href="/monad-client-book/15-how-monad-differs-from-ethereum/" class> Chapter 15: How Monad Differs From Ethereum </a> </li><li> <a href="/monad-client-book/16-glossary-timelines-and-reading-maps/" class> Appendix: Glossary, Timelines, and Reading Maps </a> </li> </ul> </nav> </aside> <main class="main"> <header class="page-header"> <h1>Chapter 5: Chain Config, Forkpoints, Restart, and Sync</h1> <div class="source-meta"> <span class="source-path">monad-client-book/05-chain-config-forkpoints-and-sync.md</span> <a class="source-link" href="https://github.com/mmv08/category-labs-notes/blob/main/monad-client-book/05-chain-config-forkpoints-and-sync.md" target="_blank" rel="noreferrer">
+View source →
+</a> </div> </header> <article class="book-content">  <p>The previous chapter described how consensus behaves when the node is already live. A real validator has a harder problem first: how does it know which rules are active, where does it restart from, how much history must it have locally, and when is it safe to leave catch-up mode and rejoin consensus? This chapter answers those questions.</p>
+<p>If you only open one function first, open <code>maybe_start_consensus()</code> in <code>monad-state/src/lib.rs</code>. That is where delayed-anchor readiness, block sync, state sync, and the sync-to-live transition all meet. It is a high-leverage chapter because restart logic is where architecture, current implementation, and operational shortcuts most often get blurred together.</p>
+<h2 id="why-this-chapter-matters">Why This Chapter Matters<a class="heading-anchor" aria-label="Link to this section" href="#why-this-chapter-matters">#</a></h2>
+<p>Running consensus safely after restart is not just “read latest block, continue.” A safe restart needs three kinds of context: the right rule set, the right certified restart anchor, and enough recent block and execution state to make live decisions again. If you miss any one of those, the node can become locally inconsistent, too far behind to vote safely, or live in appearance only.</p>
+<h2 id="51-two-kinds-of-config-time">5.1 Two Kinds Of Config Time<a class="heading-anchor" aria-label="Link to this section" href="#51-two-kinds-of-config-time">#</a></h2>
+<p><code>MonadChainConfig</code> is not just a bag of constants. It governs the chain ID, the epoch length, the epoch start delay, staking activation, rewards and fee-related parameters, consensus revision activations, and execution revision activations.</p>
+<p>The important subtlety is that it exposes two different revision lookups: <code>get_chain_revision(round)</code> and <code>get_execution_chain_revision(execution_timestamp_s)</code>. That is not duplication — it reflects the fact that consensus and execution do not advance on the same clock.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Question</th><th>Clock</th></tr></thead><tbody><tr><td>which consensus revision is active?</td><td><code>Round</code></td></tr><tr><td>which execution revision is active?</td><td>execution timestamp</td></tr></tbody></table>
+<blockquote>
+<p><strong>Architecture</strong>
+Consensus feature activation lives in round-space. Execution feature activation lives in execution-time space.</p>
+</blockquote>
+<blockquote>
+<p><strong>Current code</strong>
+The split is implemented directly in <a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-chain-config/src/lib.rs"><code>monad-chain-config/src/lib.rs</code></a>.</p>
+</blockquote>
+<h2 id="52-a-restart-anchor-is-more-than-latest-block">5.2 A Restart Anchor Is More Than “Latest Block”<a class="heading-anchor" aria-label="Link to this section" href="#52-a-restart-anchor-is-more-than-latest-block">#</a></h2>
+<p>A validator cannot restart safely from only one block hash, one latest height, or one latest state root. It needs enough protocol context to resume safely.</p>
+<p>That restart anchor is the <em>forkpoint</em>, which wraps a <em>checkpoint</em>. A checkpoint is the snapshot object produced by consensus that names a safe resumption point; the forkpoint is the persisted file-level wrapper around that checkpoint plus the nearby validator context needed to verify it on disk. Together they carry:</p>
+<ul>
+<li>committed root — the sequence-number-and-block-id pair that consensus has committed through</li>
+<li>highest carried round-ending certificate — the newest QC or TC the node can prove it saw, which tells the pacemaker where to resume in round-space</li>
+<li>bounded locked-epoch validator context — just enough validator history to verify that certificate and survive nearby epoch transitions</li>
+</ul>
+<p>This is why restart safety is a consensus problem, not only a storage problem.</p>
+<h2 id="53-why-checkpoints-carry-validator-context">5.3 Why Checkpoints Carry Validator Context<a class="heading-anchor" aria-label="Link to this section" href="#53-why-checkpoints-carry-validator-context">#</a></h2>
+<p>A QC, TC, or other carried round-ending certificate is only meaningful relative to the epoch it belongs to, the validator set active in that epoch, and the certificate-verification keys for those validators. So the node cannot validate a carried high certificate “in a vacuum” — it needs nearby validator history too. That is why the checkpoint stores a bounded locked-epoch window instead of only a block root.</p>
+<p>The checkpoint is really answering one question: if I restart here, do I still know enough validator context to trust the certificate that tells me where “here” is?</p>
+<h2 id="54-startup-may-replace-local-bootstrap-state">5.4 Startup May Replace Local Bootstrap State<a class="heading-anchor" aria-label="Link to this section" href="#54-startup-may-replace-local-bootstrap-state">#</a></h2>
+<p><em>Bootstrap state</em> means the small set of local files the node reads at startup to decide who it is, which chain it belongs to, and which restart anchor it should resume from. It is separate from durable chain storage: chain history lives in the ledger and triedb, while bootstrap state is the outer configuration shell that tells the node how to connect those durable stores together.</p>
+<p><code>NodeState::setup()</code> does more than read local files. It loads node config, chain config, forkpoint config, validator config, key material, and filesystem paths. But it can also refresh bootstrap state from remote sources when local state is too stale.</p>
+<p>So the startup rule is not “read local files and trust them forever.” It is “find the freshest trustworthy bootstrap state, replace stale local bootstrap files if necessary, then build the node from that state.” That distinction matters operationally: local bootstrap files are durable working state, but not the only source of restart truth.</p>
+<h2 id="55-the-node-starts-in-sync-mode">5.5 The Node Starts In Sync Mode<a class="heading-anchor" aria-label="Link to this section" href="#55-the-node-starts-in-sync-mode">#</a></h2>
+<p>This is a runtime fact that shapes the whole startup path in the current client. The node does not boot directly into live consensus. It starts in <code>ConsensusMode::Sync</code>, with that sync-mode state initialized around the forkpoint root, the carried high certificate, and the locked-epoch validators from startup.</p>
+<p>Then the node immediately asks three questions in sequence: do I have enough block history, do I have enough execution state, and if not, what must I request next? So “startup complete” and “safe to participate” are not the same moment.</p>
+<h2 id="56-blockbuffer">5.6 <code>BlockBuffer</code><a class="heading-anchor" aria-label="Link to this section" href="#56-blockbuffer">#</a></h2>
+<p>While the node is syncing, it still needs to reason about incoming blocks and proposals. It does not use the normal live <code>BlockTree</code> for that job; it uses <code>BlockBuffer</code>. The buffer tracks the current root, ancestor blocks around that root, newer headers above the root, cached proposal data, and recent buffered proposals.</p>
+<p>The point is not to become a second live consensus engine. The point is to hold enough local consensus history to decide whether the sync target should move, decide whether block sync is still needed, and allow a safe later transition into live mode.</p>
+<h2 id="57-sync-mode-still-learns-from-the-network">5.7 Sync Mode Still Learns From The Network<a class="heading-anchor" aria-label="Link to this section" href="#57-sync-mode-still-learns-from-the-network">#</a></h2>
+<p>Sync mode is not passive waiting. Incoming proposals can still teach the node that the network is farther ahead than its current target, and that its state-sync target should move. That is why <code>BlockBuffer::handle_proposal(...)</code> exists: even before the node is live, incoming proposals can raise the target root. So sync mode is not live consensus, but it is also not blind waiting.</p>
+<h2 id="58-block-sync-and-state-sync-solve-different-problems">5.8 Block Sync And State Sync Solve Different Problems<a class="heading-anchor" aria-label="Link to this section" href="#58-block-sync-and-state-sync-solve-different-problems">#</a></h2>
+<p>These are easy to blur together. They should stay separate.</p>
+<h3 id="block-sync">Block Sync<a class="heading-anchor" aria-label="Link to this section" href="#block-sync">#</a></h3>
+<p>Block sync fetches missing consensus blocks and ancestry. Its job is to rebuild enough ordered block history around the restart root.</p>
+<h3 id="state-sync">State Sync<a class="heading-anchor" aria-label="Link to this section" href="#state-sync">#</a></h3>
+<p>State sync fetches recent execution-side state. Its job is to bring the execution database forward enough that the node can validate and serve recent execution views.</p>
+<p>So the simple distinction is that block sync repairs consensus history, while state sync repairs execution state. The node needs both before it can safely rejoin.</p>
+<h2 id="59-the-delayed-anchor">5.9 The Delayed Anchor<a class="heading-anchor" aria-label="Link to this section" href="#59-the-delayed-anchor">#</a></h2>
+<p>This is the sync-specific detail to internalize. The node does not choose an arbitrary execution snapshot point; it chooses a point implied by the delayed-execution architecture itself, roughly <code>root_seq_num - execution_delay</code>. That is the delayed anchor.</p>
+<p>The arithmetic is only the first approximation. In the code, the node also derives a concrete delayed block ID from the root path and uses the presence of that block’s execution result as the real readiness check.</p>
+<p>Why this anchor? Because the node does not need “the freshest imaginable execution state.” It needs enough execution state to safely reason about the delayed-execution window around the current consensus root. This is where sync, delayed execution, and block coherency all meet.</p>
+<h2 id="510-one-numeric-delayed-anchor-example">5.10 One Numeric Delayed-Anchor Example<a class="heading-anchor" aria-label="Link to this section" href="#510-one-numeric-delayed-anchor-example">#</a></h2>
+<p>Suppose the current root is <code>SeqNum(100)</code> and <code>execution_delay = 3</code>. Then the useful first-pass picture is that the delayed anchor is around <code>SeqNum(97)</code>, and the node wants to know whether the execution result for that delayed block is already locally available. If it is, the node may already have enough execution state to finish sync; if it is not, state sync should target the delayed execution result carried on the root path.</p>
+<p>That means the node is not asking “do I have execution for the absolute tip?” It is asking “do I have enough execution state at the delayed point that consensus actually depends on?” That is a very Monad-specific restart rule.</p>
+<h2 id="511-maybe_start_consensus">5.11 <code>maybe_start_consensus()</code><a class="heading-anchor" aria-label="Link to this section" href="#511-maybe_start_consensus">#</a></h2>
+<p>This function is the gatekeeper for the live transition.</p>
+<p>In the current code, it does the readiness check in stages.</p>
+<h3 id="stage-1-do-we-have-enough-committed-parent-blocks">Stage 1: Do We Have Enough Committed Parent Blocks?<a class="heading-anchor" aria-label="Link to this section" href="#stage-1-do-we-have-enough-committed-parent-blocks">#</a></h3>
+<p>If the block buffer still lacks enough committed parent history, the node requests block sync first. No execution-state request yet, no live transition yet — first fix ancestry.</p>
+<h3 id="stage-2-compute-the-delayed-anchor">Stage 2: Compute The Delayed Anchor<a class="heading-anchor" aria-label="Link to this section" href="#stage-2-compute-the-delayed-anchor">#</a></h3>
+<p>Once enough block history exists, the node computes the delayed anchor: roughly <code>root_seq_num - execution_delay</code>, plus the concrete delayed block ID implied by the root path. That is the point whose execution availability matters for live readiness.</p>
+<h3 id="stage-3-is-the-execution-db-ready-there">Stage 3: Is The Execution DB Ready There?<a class="heading-anchor" aria-label="Link to this section" href="#stage-3-is-the-execution-db-ready-there">#</a></h3>
+<p>The node checks whether the execution result for that concrete delayed block already exists locally. If yes, it can effectively treat state sync as done for that target. If no, it requests state sync from the delayed execution result carried on the root path.</p>
+<p>This is the design choice at the center of the startup path: the node does not pick an arbitrary snapshot point — it uses the delayed-execution structure implied by consensus itself.</p>
+<h3 id="stage-4-rebuild-live-local-context">Stage 4: Rebuild Live Local Context<a class="heading-anchor" aria-label="Link to this section" href="#stage-4-rebuild-live-local-context">#</a></h3>
+<p>Once DB sync is done, the live-transition path rebuilds more than one local subsystem. It resets block policy from a committed window behind the root, resets the txpool from that same committed window, rechecks staking-backed validator data when staking is active, and builds a fresh live <code>ConsensusState</code>.</p>
+<h3 id="stage-5-start-execution-and-resume-live-flow">Stage 5: Start Execution And Resume Live Flow<a class="heading-anchor" aria-label="Link to this section" href="#stage-5-start-execution-and-resume-live-flow">#</a></h3>
+<p>Then the node emits <code>StartExecution</code>, rebuilds live consensus, and replays cached proposals that arrived while syncing. That last step matters — sync mode is not a black hole.</p>
+<h2 id="512-a-restart-timeline">5.12 A Restart Timeline<a class="heading-anchor" aria-label="Link to this section" href="#512-a-restart-timeline">#</a></h2>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="mermaid"><code><span class="line"><span style="color:#E1E4E8">flowchart LR</span></span>
+<span class="line"><span style="color:#E1E4E8">    Setup["load config, keys, forkpoint, validator data"] --> Sync["enter ConsensusMode::Sync"]</span></span>
+<span class="line"><span style="color:#E1E4E8">    Sync --> BlockCheck{"enough block ancestry?"}</span></span>
+<span class="line"><span style="color:#E1E4E8">    BlockCheck -->|no| BlockSync["request block sync"]</span></span>
+<span class="line"><span style="color:#E1E4E8">    BlockCheck -->|yes| StateCheck{"execution DB ready at delayed anchor?"}</span></span>
+<span class="line"><span style="color:#E1E4E8">    StateCheck -->|no| StateSync["request state sync"]</span></span>
+<span class="line"><span style="color:#E1E4E8">    StateCheck -->|yes| Done["DoneSync path"]</span></span>
+<span class="line"><span style="color:#E1E4E8">    BlockSync --> StateCheck</span></span>
+<span class="line"><span style="color:#E1E4E8">    StateSync --> Done</span></span>
+<span class="line"><span style="color:#E1E4E8">    Done --> Live["rebuild live local state, start execution, become live"]</span></span></code></pre>
+<p>That is the current client’s restart story in one diagram.</p>
+<h2 id="513-the-three-threshold-knobs">5.13 The Three Threshold Knobs<a class="heading-anchor" aria-label="Link to this section" href="#513-the-three-threshold-knobs">#</a></h2>
+<p><code>ConsensusConfig</code> carries three sync-related thresholds: <code>statesync_to_live_threshold</code>, <code>live_to_statesync_threshold</code>, and <code>start_execution_threshold</code>. The important nuance is not the math — it is how these knobs are currently used.</p>
+<h3 id="what-they-mean">What They Mean<a class="heading-anchor" aria-label="Link to this section" href="#what-they-mean">#</a></h3>
+<p><code>statesync_to_live_threshold</code> says how close a syncing node must be before it is allowed to rejoin live operation. <code>live_to_statesync_threshold</code> says how far behind a live node may fall before it should stop pretending to be current. <code>start_execution_threshold</code> is a config-model notion of how early execution may start relative to the restart target.</p>
+<h3 id="current-code-nuance">Current Code Nuance<a class="heading-anchor" aria-label="Link to this section" href="#current-code-nuance">#</a></h3>
+<p>The first two have obvious meaning in the live path. The third is more subtle: the config model exposes it, but the checked-out <code>maybe_start_consensus()</code> path still emits <code>StartExecution</code> when sync completes and live consensus is initialized, and the visible sync-to-live branch here is not obviously keyed directly off <code>start_execution_threshold</code>. So this is one of those places where the book has to say both “there is a config-level idea” and “there is the current startup-path behavior” and let the two coexist.</p>
+<h2 id="514-what-happens-on-donesync">5.14 What Happens On <code>DoneSync</code><a class="heading-anchor" aria-label="Link to this section" href="#514-what-happens-on-donesync">#</a></h2>
+<p><code>DoneSync</code> is not a simple boolean flip. In current code, the live-transition path does meaningful work:</p>
+<ul>
+<li>marks DB sync complete</li>
+<li>reconstructs a recent committed block window behind the root</li>
+<li>resets block policy from that committed window</li>
+<li>resets the txpool from that same window</li>
+<li>rechecks staking-backed validator data when staking is active</li>
+<li>builds a fresh live <code>ConsensusState</code></li>
+<li>emits <code>StartExecution</code></li>
+<li>replays cached proposals that arrived while syncing</li>
+</ul>
+<p>That is why “done syncing” is better understood as rebuilding live local context from the synchronized anchor, not as flipping one flag.</p>
+<h2 id="515-one-honest-current-code-nuance">5.15 One Honest Current-Code Nuance<a class="heading-anchor" aria-label="Link to this section" href="#515-one-honest-current-code-nuance">#</a></h2>
+<p>The checked-out live-transition path has one especially useful comment: after switching live, it immediately drives a local vote path, and the code notes that in a stricter idealization it would wait for the vote pacing timer, but in practice it treats the shortcut as acceptable. That is a good example of the difference between protocol idealization and implementation pragmatism, and for a book like this, surfacing that kind of nuance increases trust.</p>
+<h2 id="516-the-validator-set-recheck-on-rejoin">5.16 The Validator-Set Recheck On Rejoin<a class="heading-anchor" aria-label="Link to this section" href="#516-the-validator-set-recheck-on-rejoin">#</a></h2>
+<p>This is a good example of “real feature, still slightly unfinished detail.” The live-transition path re-reads staking-backed validator data from triedb and checks that it matches the locked validator context loaded at startup. That is real and important.</p>
+<p>But the checked-out implementation also carries a TODO. The read currently uses <code>delay_seq_num</code> — the sequence number at the delayed-execution anchor, roughly <code>root_seq_num - execution_delay</code>, which is the oldest point whose execution results the node already trusts. The comment says <code>root_seq_num</code> — the sequence number of the committed restart root itself, which is newer than <code>delay_seq_num</code> by <code>execution_delay</code> blocks — should be used instead. Relevant code lives in <a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-state/src/lib.rs"><code>monad-state/src/lib.rs</code></a>.</p>
+<h2 id="517-architecture-current-code-current-caveat">5.17 Architecture, Current Code, Current Caveat<a class="heading-anchor" aria-label="Link to this section" href="#517-architecture-current-code-current-caveat">#</a></h2>
+<blockquote>
+<p><strong>Architecture</strong>
+Safe restart needs three things: a certified consensus anchor, enough recent block history, and enough recent execution state at the delayed anchor the live protocol actually depends on.</p>
+</blockquote>
+<blockquote>
+<p><strong>Current code</strong>
+The node starts in <code>ConsensusMode::Sync</code>, uses <code>BlockBuffer</code> to reason about the restart root, gates live entry through <code>maybe_start_consensus()</code>, and emits <code>StartExecution</code> during the live transition.</p>
+</blockquote>
+<blockquote>
+<p><strong>Current caveat</strong>
+Some sync thresholds are more explicit in the config model than in the visible startup path, and the staking-backed validator-set recheck still carries a TODO around which sequence number should be read.</p>
+</blockquote>
+<h2 id="open-these-files-first">Open These Files First<a class="heading-anchor" aria-label="Link to this section" href="#open-these-files-first">#</a></h2>
+<ul>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-node/src/state.rs"><code>monad-node/src/state.rs</code></a>: startup setup and bootstrap-state loading</li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-state/src/lib.rs"><code>monad-state/src/lib.rs</code></a>: <code>maybe_start_consensus</code>, <code>DoneSync</code>, validator-set recheck</li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-node/src/main.rs"><code>monad-node/src/main.rs</code></a>: <code>EXECUTION_DELAY = 3</code> and top-level node wiring</li>
+</ul>
+<h2 id="then-open-these">Then Open These<a class="heading-anchor" aria-label="Link to this section" href="#then-open-these">#</a></h2>
+<ul>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-state/src/consensus.rs"><code>monad-state/src/consensus.rs</code></a>: mode-aware consensus event routing</li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-chain-config/src/lib.rs"><code>monad-chain-config/src/lib.rs</code></a>: consensus versus execution revision clocks</li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-updaters/src/triedb_val_set.rs"><code>monad-updaters/src/triedb_val_set.rs</code></a>: validator-set updates from triedb-side reads</li>
+</ul>
+<h2 id="then-keep-these-nearby">Then Keep These Nearby<a class="heading-anchor" aria-label="Link to this section" href="#then-keep-these-nearby">#</a></h2>
+<ul>
+<li><a href="/monad-client-book/16-glossary-timelines-and-reading-maps#the-canonical-delayed-execution-timeline">Canonical Delayed-Execution Timeline</a></li>
+<li><a href="/monad-client-book/16-glossary-timelines-and-reading-maps#clocks-and-identifiers-cheat-sheet">Clocks And Identifiers Cheat Sheet</a></li>
+</ul>
+<h2 id="what-to-remember">What To Remember<a class="heading-anchor" aria-label="Link to this section" href="#what-to-remember">#</a></h2>
+<ul>
+<li>Consensus and execution revisions activate on different clocks.</li>
+<li>A forkpoint is a restart anchor, not just a latest-block pointer.</li>
+<li>The node starts in sync mode, not live mode.</li>
+<li><code>BlockBuffer</code> exists so sync mode can still reason about useful proposal and ancestry information.</li>
+<li>Block sync and state sync solve different problems.</li>
+<li><code>maybe_start_consensus()</code> is the live-transition gatekeeper.</li>
+<li>The node syncs to a delayed execution anchor implied by the protocol, not an arbitrary tip snapshot.</li>
+<li><code>DoneSync</code> rebuilds more than one subsystem before the node becomes live.</li>
+</ul>
+<p>The next chapter crosses the repo boundary and explains where execution really lives.</p>  </article> <nav class="chapter-nav" aria-label="Chapter navigation"><div class="chapter-nav-item"><a href="/monad-client-book/04-the-consensus-protocol/"><span class="chapter-nav-label">Previous</span>
+← Chapter 4: The Consensus Protocol</a></div><div class="chapter-nav-item chapter-nav-item-next"><a href="/monad-client-book/06-execution-and-evm/"><span class="chapter-nav-label">Next</span>Chapter 6: Execution Boundary and Process Architecture →
+</a></div></nav> </main> <aside class="chapter-tools"> <section class="tools-panel" aria-label="Table of contents"> <h2>On this page</h2> <ul class="toc-list"> <li> <a class="toc-link depth-2" href="#why-this-chapter-matters"> Why This Chapter Matters </a> </li><li> <a class="toc-link depth-2" href="#51-two-kinds-of-config-time"> 5.1 Two Kinds Of Config Time </a> </li><li> <a class="toc-link depth-2" href="#52-a-restart-anchor-is-more-than-latest-block"> 5.2 A Restart Anchor Is More Than “Latest Block” </a> </li><li> <a class="toc-link depth-2" href="#53-why-checkpoints-carry-validator-context"> 5.3 Why Checkpoints Carry Validator Context </a> </li><li> <a class="toc-link depth-2" href="#54-startup-may-replace-local-bootstrap-state"> 5.4 Startup May Replace Local Bootstrap State </a> </li><li> <a class="toc-link depth-2" href="#55-the-node-starts-in-sync-mode"> 5.5 The Node Starts In Sync Mode </a> </li><li> <a class="toc-link depth-2" href="#56-blockbuffer"> 5.6 BlockBuffer </a> </li><li> <a class="toc-link depth-2" href="#57-sync-mode-still-learns-from-the-network"> 5.7 Sync Mode Still Learns From The Network </a> </li><li> <a class="toc-link depth-2" href="#58-block-sync-and-state-sync-solve-different-problems"> 5.8 Block Sync And State Sync Solve Different Problems </a> </li><li> <a class="toc-link depth-3" href="#block-sync"> Block Sync </a> </li><li> <a class="toc-link depth-3" href="#state-sync"> State Sync </a> </li><li> <a class="toc-link depth-2" href="#59-the-delayed-anchor"> 5.9 The Delayed Anchor </a> </li><li> <a class="toc-link depth-2" href="#510-one-numeric-delayed-anchor-example"> 5.10 One Numeric Delayed-Anchor Example </a> </li><li> <a class="toc-link depth-2" href="#511-maybe_start_consensus"> 5.11 maybe_start_consensus() </a> </li><li> <a class="toc-link depth-3" href="#stage-1-do-we-have-enough-committed-parent-blocks"> Stage 1: Do We Have Enough Committed Parent Blocks? </a> </li><li> <a class="toc-link depth-3" href="#stage-2-compute-the-delayed-anchor"> Stage 2: Compute The Delayed Anchor </a> </li><li> <a class="toc-link depth-3" href="#stage-3-is-the-execution-db-ready-there"> Stage 3: Is The Execution DB Ready There? </a> </li><li> <a class="toc-link depth-3" href="#stage-4-rebuild-live-local-context"> Stage 4: Rebuild Live Local Context </a> </li><li> <a class="toc-link depth-3" href="#stage-5-start-execution-and-resume-live-flow"> Stage 5: Start Execution And Resume Live Flow </a> </li><li> <a class="toc-link depth-2" href="#512-a-restart-timeline"> 5.12 A Restart Timeline </a> </li><li> <a class="toc-link depth-2" href="#513-the-three-threshold-knobs"> 5.13 The Three Threshold Knobs </a> </li><li> <a class="toc-link depth-3" href="#what-they-mean"> What They Mean </a> </li><li> <a class="toc-link depth-3" href="#current-code-nuance"> Current Code Nuance </a> </li><li> <a class="toc-link depth-2" href="#514-what-happens-on-donesync"> 5.14 What Happens On DoneSync </a> </li><li> <a class="toc-link depth-2" href="#515-one-honest-current-code-nuance"> 5.15 One Honest Current-Code Nuance </a> </li><li> <a class="toc-link depth-2" href="#516-the-validator-set-recheck-on-rejoin"> 5.16 The Validator-Set Recheck On Rejoin </a> </li><li> <a class="toc-link depth-2" href="#517-architecture-current-code-current-caveat"> 5.17 Architecture, Current Code, Current Caveat </a> </li><li> <a class="toc-link depth-2" href="#open-these-files-first"> Open These Files First </a> </li><li> <a class="toc-link depth-2" href="#then-open-these"> Then Open These </a> </li><li> <a class="toc-link depth-2" href="#then-keep-these-nearby"> Then Keep These Nearby </a> </li><li> <a class="toc-link depth-2" href="#what-to-remember"> What To Remember </a> </li> </ul> </section> </aside> </div> <div class="mermaid-modal" data-mermaid-modal hidden role="dialog" aria-modal="true" aria-labelledby="mermaid-modal-title"> <div class="mermaid-modal-shell"> <div class="mermaid-modal-toolbar"> <p class="mermaid-modal-title" id="mermaid-modal-title">Diagram</p> <div class="mermaid-modal-actions"> <button type="button" class="mermaid-modal-action" data-mermaid-fit>
+Fit
+</button> <button type="button" class="mermaid-modal-action" data-mermaid-reset>
+Reset
+</button> <button type="button" class="mermaid-modal-action" data-mermaid-close aria-label="Close expanded diagram">
+Close
+</button> </div> </div> <div class="mermaid-modal-stage"> <div class="mermaid-modal-canvas" data-mermaid-canvas></div> </div> </div> </div> <script type="module" src="/monad-client-book/_astro/BookLayout.astro_astro_type_script_index_0_lang.Cmw0jMFF.js"></script> </body> </html>

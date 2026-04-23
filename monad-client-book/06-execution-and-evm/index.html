@@ -1,0 +1,246 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="generator" content="Astro v6.1.9"><title>Chapter 6: Execution Boundary and Process Architecture</title><meta property="og:title" content="Chapter 6: Execution Boundary and Process Architecture"><meta property="og:image" content="https://mmv08.github.io/monad-client-book/og-image.png"><link rel="stylesheet" href="/monad-client-book/_astro/book.np3A6oR_.css"></head> <body data-has-toc="true" data-has-mermaid="true"> <button class="menu-toggle" id="menuToggle" aria-label="Toggle menu">☰</button> <div class="page "> <aside class="sidebar" id="sidebar"> <p class="sidebar-title"><a href="/monad-client-book/">Monad Client Book</a></p> <nav> <ul> <li> <a href="/monad-client-book/00-introduction/" class> The Monad Client: A Bottom-Up Code Walkthrough </a> </li><li> <a href="/monad-client-book/01-foundation-types-and-crypto/" class> Chapter 1: Foundation — Types and Cryptography </a> </li><li> <a href="/monad-client-book/02-validators-epochs-and-leader-election/" class> Chapter 2: Validators, Epochs, and Leader Election </a> </li><li> <a href="/monad-client-book/03-consensus-data-structures/" class> Chapter 3: Consensus Data Structures </a> </li><li> <a href="/monad-client-book/04-the-consensus-protocol/" class> Chapter 4: The Consensus Protocol </a> </li><li> <a href="/monad-client-book/05-chain-config-forkpoints-and-sync/" class> Chapter 5: Chain Config, Forkpoints, Restart, and Sync </a> </li><li> <a href="/monad-client-book/06-execution-and-evm/" class="active"> Chapter 6: Execution Boundary and Process Architecture </a> </li><li> <a href="/monad-client-book/07-execution-data-model-and-state-transition/" class> Chapter 7: Execution Data Model and State Transition </a> </li><li> <a href="/monad-client-book/08-execution-services-triedb-events-and-hosted-apis/" class> Chapter 8: Execution Services — Triedb, Event Rings, and Hosted APIs </a> </li><li> <a href="/monad-client-book/09-transaction-pool-and-fee-market/" class> Chapter 9: Transaction Pool and Fee Market </a> </li><li> <a href="/monad-client-book/10-networking-and-p2p/" class> Chapter 10: Networking and Peer-to-Peer Communication </a> </li><li> <a href="/monad-client-book/11-storage-and-state/" class> Chapter 11: Storage and State </a> </li><li> <a href="/monad-client-book/12-node-assembly-and-rpc/" class> Chapter 12: Node Assembly and RPC </a> </li><li> <a href="/monad-client-book/13-failure-modes-and-defenses/" class> Chapter 13: Failure Modes and Defenses </a> </li><li> <a href="/monad-client-book/14-testing-and-simulation/" class> Chapter 14: Testing and Simulation </a> </li><li> <a href="/monad-client-book/15-how-monad-differs-from-ethereum/" class> Chapter 15: How Monad Differs From Ethereum </a> </li><li> <a href="/monad-client-book/16-glossary-timelines-and-reading-maps/" class> Appendix: Glossary, Timelines, and Reading Maps </a> </li> </ul> </nav> </aside> <main class="main"> <header class="page-header"> <h1>Chapter 6: Execution Boundary and Process Architecture</h1> <div class="source-meta"> <span class="source-path">monad-client-book/06-execution-and-evm.md</span> <a class="source-link" href="https://github.com/mmv08/category-labs-notes/blob/main/monad-client-book/06-execution-and-evm.md" target="_blank" rel="noreferrer">
+View source →
+</a> </div> </header> <article class="book-content">  <p>Up to this point, the book mostly stayed inside <code>monad-bft</code>. That was the right starting point, because consensus decides what the chain means. But a Monad node does not execute blocks inside one giant Rust state machine. Execution lives in a different repo, often in a different process, and is also reused through hosted APIs and shared output surfaces.</p>
+<p>This chapter is where the whole system stops feeling like a Rust client with some extras and starts feeling like one control plane plus one execution system plus several carefully chosen bridges.</p>
+<h2 id="why-this-chapter-matters">Why This Chapter Matters<a class="heading-anchor" aria-label="Link to this section" href="#why-this-chapter-matters">#</a></h2>
+<p>Most new readers get confused in the same place. Consensus orders a block, execution validates and executes that block, and RPC later serves reads about that block. Those sound like three steps in one program. They are not — they cross repo boundaries, process boundaries, FFI boundaries, local IPC boundaries, and live-output boundaries.</p>
+<p>Two acronyms show up repeatedly in this chapter. <em>FFI</em> stands for foreign function interface, meaning Rust code reaches into the execution C/C++ library and calls its functions directly inside the same process, without an RPC hop. <em>IPC</em> stands for inter-process communication, here specifically Unix domain sockets used between two cooperating processes on the same machine. If you keep those boundaries straight, the rest of the codebase becomes much easier to trust.</p>
+<p>If you only open one execution file first, open <code>cmd/monad/runloop_monad.cpp</code>. That is where ordered-block ingestion, delayed-result validation, and execution-side publication meet.</p>
+<h2 id="61-the-split-at-a-glance">6.1 The Split At A Glance<a class="heading-anchor" aria-label="Link to this section" href="#61-the-split-at-a-glance">#</a></h2>
+<p>The clean high-level split is:</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Repo</th><th>Main job</th></tr></thead><tbody><tr><td><code>monad-bft</code></td><td>consensus, validator networking, txpool, ledger persistence, node assembly, RPC assembly</td></tr><tr><td><code>monad</code></td><td>EVM execution, triedb or MonadDB, execution-side Monad rules, execution daemon, hosted execution APIs</td></tr></tbody></table>
+<p>So the short execution-side restatement is: one consensus-side control plane, one execution-side state-transition system, and several bridges between them.</p>
+<h2 id="62-libmonad_execution-is-the-shared-execution-core">6.2 <code>libmonad_execution</code> Is The Shared Execution Core<a class="heading-anchor" aria-label="Link to this section" href="#62-libmonad_execution-is-the-shared-execution-core">#</a></h2>
+<p>The execution repo’s own overview is useful here. Most execution code is built around one shared execution library core. In the build system, the CMake target is <code>monad_execution</code>, and it produces the <code>libmonad_execution</code> library file that every other execution surface links against. The execution repo’s overview refers to it by that file name, and this book follows the same convention.</p>
+<p>That matters because it explains why execution shows up in more than one runtime shape without changing ownership. The same execution-owned core is used in three modes: daemon mode (the stand-alone <code>monad</code> execution daemon), hosted mode (execution APIs loaded into Rust-side processes), and developer or test tooling inside the execution repo.</p>
+<p>So the correct picture is that the execution repo owns one execution library core, and that core can be consumed in several runtime modes. This is why repo boundary and process boundary are related but not identical in Monad.</p>
+<h2 id="63-there-is-more-than-one-boundary">6.3 There Is More Than One Boundary<a class="heading-anchor" aria-label="Link to this section" href="#63-there-is-more-than-one-boundary">#</a></h2>
+<p>Several different boundaries exist at once.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Boundary</th><th>Example</th><th>What crosses it</th></tr></thead><tbody><tr><td>repo boundary</td><td><code>monad-bft</code> &#x3C;-> <code>monad</code></td><td>ownership, source layout, build integration</td></tr><tr><td>process boundary</td><td><code>monad-node</code> -> ledger files -> execution daemon</td><td>ordered blocks</td></tr><tr><td>local IPC boundary</td><td><code>monad-rpc</code> -> txpool Unix socket</td><td>transaction submission</td></tr><tr><td>FFI / hosted API boundary</td><td>Rust wrappers -> execution-owned APIs</td><td>triedb reads, <code>eth_call</code>, validator-set reads</td></tr><tr><td>live-output boundary</td><td>execution daemon -> event ring</td><td>freshest execution events</td></tr></tbody></table>
+<p>A good reading habit is to not only ask “where is execution?” but also “which execution boundary is this code crossing right now?“</p>
+<h2 id="64-why-monad-bft-still-contains-monad-execution">6.4 Why <code>monad-bft</code> Still Contains <code>monad-execution/</code><a class="heading-anchor" aria-label="Link to this section" href="#64-why-monad-bft-still-contains-monad-execution">#</a></h2>
+<p>The consensus repo contains <code>monad-execution/</code>, which looks contradictory until you notice what it is: a git submodule pointing back to the execution repo, used for Rust path dependencies that expose execution-owned crates. So the right mental model is that <code>monad</code> still owns execution, and <code>monad-bft</code> vendors execution code where the Rust build needs local access. This is a packaging choice, not an architectural collapse.</p>
+<h2 id="65-the-three-main-ways-execution-is-consumed">6.5 The Three Main Ways Execution Is Consumed<a class="heading-anchor" aria-label="Link to this section" href="#65-the-three-main-ways-execution-is-consumed">#</a></h2>
+<p>Execution is consumed in three main modes.</p>
+<h3 id="stand-alone-daemon-mode">Stand-Alone Daemon Mode<a class="heading-anchor" aria-label="Link to this section" href="#stand-alone-daemon-mode">#</a></h3>
+<p>The binary under <code>cmd/monad</code> is a long-running execution service.</p>
+<p>In that mode:</p>
+<ol>
+<li><code>monad-node</code> writes ordered consensus blocks to the ledger</li>
+<li>the execution daemon reads those blocks from disk</li>
+<li>it validates and executes them</li>
+<li>it writes recent outputs into triedb</li>
+<li>it emits fresh execution events</li>
+</ol>
+<h3 id="hosted-library-mode">Hosted Library Mode<a class="heading-anchor" aria-label="Link to this section" href="#hosted-library-mode">#</a></h3>
+<p>Parts of the execution repo are also linked into Rust-side binaries. That is why <code>monad-node</code> and <code>monad-rpc</code> can use execution-owned services for triedb reads, validator-set reads, <code>eth_call</code>, and event-stream consumption.</p>
+<h3 id="output-surface-mode">Output-Surface Mode<a class="heading-anchor" aria-label="Link to this section" href="#output-surface-mode">#</a></h3>
+<p>Execution is also consumed indirectly through the surfaces it keeps fresh — triedb as the retained recent execution database, and the execution event ring as the freshest live stream. This third mode matters because many node behaviors are not “call execution now” but “read what execution already produced.”</p>
+<h2 id="66-the-execution-daemon-is-not-the-nodes-network-identity">6.6 The Execution Daemon Is Not The Node’s Network Identity<a class="heading-anchor" aria-label="Link to this section" href="#66-the-execution-daemon-is-not-the-nodes-network-identity">#</a></h2>
+<p>This point is easy to say too vaguely, so it is worth stating plainly. The execution daemon does not run consensus, does not own the validator’s public network identity, and does not speak the validator consensus protocol to peers. The validator’s network identity belongs to the Rust-side node process. Execution is a local partner service that provides block execution, recent-state persistence, and execution-side query logic.</p>
+<p>That is why “consensus client” and “execution client” in Monad do not map perfectly onto the language many Ethereum readers expect. Modern Ethereum also splits consensus and execution, but Monad pushes the split further into delayed execution, richer execution-side read surfaces, and more direct execution-backed validator-state reads.</p>
+<h2 id="67-the-main-runtime-loop">6.7 The Main Runtime Loop<a class="heading-anchor" aria-label="Link to this section" href="#67-the-main-runtime-loop">#</a></h2>
+<p>This is the simplest accurate picture:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="mermaid"><code><span class="line"><span style="color:#E1E4E8">flowchart LR</span></span>
+<span class="line"><span style="color:#E1E4E8">    Node["monad-node"] -->|writes ordered blocks| Ledger["ledger directory"]</span></span>
+<span class="line"><span style="color:#E1E4E8">    Ledger -->|reads new blocks| Exec["monad execution daemon"]</span></span>
+<span class="line"><span style="color:#E1E4E8">    Exec -->|writes recent state| Triedb["triedb / MonadDB"]</span></span>
+<span class="line"><span style="color:#E1E4E8">    Exec -->|publishes live events| Ring["execution event ring"]</span></span>
+<span class="line"><span style="color:#E1E4E8">    Node -->|hosted reads| Triedb</span></span>
+<span class="line"><span style="color:#E1E4E8">    RPC["monad-rpc"] -->|hosted reads| Triedb</span></span>
+<span class="line"><span style="color:#E1E4E8">    RPC -->|live subscriptions| Ring</span></span></code></pre>
+<p>The direction matters: consensus makes an ordered block exist first, execution consumes that ordered block later, and read paths consume execution outputs after that. This is the process-level version of delayed execution.</p>
+<h2 id="68-one-transaction-across-the-boundary">6.8 One Transaction Across The Boundary<a class="heading-anchor" aria-label="Link to this section" href="#68-one-transaction-across-the-boundary">#</a></h2>
+<p>It helps to watch one transaction cross the ownership lines.</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="mermaid"><code><span class="line"><span style="color:#E1E4E8">sequenceDiagram</span></span>
+<span class="line"><span style="color:#E1E4E8">    participant Client as wallet or app</span></span>
+<span class="line"><span style="color:#E1E4E8">    participant RPC as monad-rpc</span></span>
+<span class="line"><span style="color:#E1E4E8">    participant Pool as txpool</span></span>
+<span class="line"><span style="color:#E1E4E8">    participant Node as monad-node</span></span>
+<span class="line"><span style="color:#E1E4E8">    participant Ledger as ledger files</span></span>
+<span class="line"><span style="color:#E1E4E8">    participant Exec as execution daemon</span></span>
+<span class="line"><span style="color:#E1E4E8">    participant DB as triedb</span></span>
+<span class="line"><span style="color:#E1E4E8">    participant Ring as event ring</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#E1E4E8">    Client->>RPC: eth_sendRawTransaction</span></span>
+<span class="line"><span style="color:#E1E4E8">    RPC->>Pool: tx over Unix socket</span></span>
+<span class="line"><span style="color:#E1E4E8">    Pool->>Node: sequenceable candidate</span></span>
+<span class="line"><span style="color:#E1E4E8">    Node->>Ledger: persist ordered block</span></span>
+<span class="line"><span style="color:#E1E4E8">    Exec->>Ledger: read ordered block</span></span>
+<span class="line"><span style="color:#E1E4E8">    Exec->>Exec: validate and execute</span></span>
+<span class="line"><span style="color:#E1E4E8">    Exec->>DB: write recent state and block data</span></span>
+<span class="line"><span style="color:#E1E4E8">    Exec->>Ring: publish fresh events</span></span>
+<span class="line"><span style="color:#E1E4E8">    RPC->>DB: answer later retained reads</span></span>
+<span class="line"><span style="color:#E1E4E8">    RPC->>Ring: push subscriptions</span></span></code></pre>
+<p>A few important consequences fall out of this flow. RPC does not directly mutate consensus state, the execution daemon does not decide ordering, and later reads usually come from triedb or the event ring rather than the ledger.</p>
+<h2 id="69-what-each-consumption-mode-can-and-cannot-do">6.9 What Each Consumption Mode Can And Cannot Do<a class="heading-anchor" aria-label="Link to this section" href="#69-what-each-consumption-mode-can-and-cannot-do">#</a></h2>
+<p>This table is a good sanity check.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Mode</th><th>Can do</th><th>Cannot do</th></tr></thead><tbody><tr><td>execution daemon</td><td>consume ordered blocks, execute them, write triedb, emit events</td><td>become the validator’s P2P identity</td></tr><tr><td>hosted triedb reader</td><td>answer retained recent execution reads</td><td>advance chain execution by itself</td></tr><tr><td>hosted <code>eth_call</code> executor</td><td>simulate execution against chosen state</td><td>commit a real block</td></tr><tr><td>event-ring consumer</td><td>observe freshest execution output</td><td>replace durable recent-state storage</td></tr></tbody></table>
+<p>If you ever start reasoning as though one of those modes can do another mode’s job, you are probably mixing layers.</p>
+<h2 id="610-the-execution-repo-is-larger-than-the-c-side">6.10 The Execution Repo Is Larger Than “The C++ Side”<a class="heading-anchor" aria-label="Link to this section" href="#610-the-execution-repo-is-larger-than-the-c-side">#</a></h2>
+<p>It is true that the execution repo is primarily C++. It is also too simple to think of it as one daemon binary plus some helper glue. The execution repo contains several major subsystems:</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Directory</th><th>What lives there</th></tr></thead><tbody><tr><td><code>docs</code></td><td>execution architecture and developer overview</td></tr><tr><td><code>cmd/monad</code></td><td>execution daemon assembly and run loops</td></tr><tr><td><code>category/execution</code></td><td>block execution logic and Monad-specific execution rules</td></tr><tr><td><code>category/mpt</code></td><td>triedb or MonadDB</td></tr><tr><td><code>category/rpc</code></td><td>hosted execution APIs such as <code>eth_call</code></td></tr><tr><td><code>category/statesync</code></td><td>execution-side state sync</td></tr><tr><td><code>test</code></td><td>execution-side tests, Ethereum fixtures, VM tests</td></tr></tbody></table>
+<p>So a better summary is one execution repo, one shared execution core, and several execution-facing surfaces.</p>
+<h2 id="611-hosted-mode-does-not-erase-the-boundary">6.11 Hosted Mode Does Not Erase The Boundary<a class="heading-anchor" aria-label="Link to this section" href="#611-hosted-mode-does-not-erase-the-boundary">#</a></h2>
+<p>It is tempting to see Rust-side triedb readers or <code>eth_call</code> helpers and conclude that execution is actually inside the Rust binaries after all. That is the wrong conclusion. Hosted mode means the same execution repo is reused through libraries, some execution services can run in-process, and ownership still remains with the execution repo. This is why the repo boundary is stable while the process boundary depends on which surface is being used.</p>
+<h2 id="612-architecture-current-code-current-caveat">6.12 Architecture, Current Code, Current Caveat<a class="heading-anchor" aria-label="Link to this section" href="#612-architecture-current-code-current-caveat">#</a></h2>
+<blockquote>
+<p><strong>Architecture</strong>
+Consensus orders blocks quickly. Execution consumes those ordered blocks later, maintains retained recent execution state, and publishes execution outputs for the rest of the node.</p>
+</blockquote>
+<blockquote>
+<p><strong>Current code</strong>
+The main ordered-block handoff is ledger-file based, while many recent reads and simulations use hosted execution libraries.</p>
+</blockquote>
+<blockquote>
+<p><strong>Current caveat</strong>
+Because <code>monad-bft</code> vendors execution code through the <code>monad-execution/</code> submodule, the source tree can look more unified than the runtime ownership really is.</p>
+</blockquote>
+<h2 id="open-these-files-first">Open These Files First<a class="heading-anchor" aria-label="Link to this section" href="#open-these-files-first">#</a></h2>
+<ul>
+<li><a href="https://github.com/category-labs/monad/blob/613698c24cec49da31ae7d383307916876265070/docs/overview.md"><code>docs/overview.md</code></a>: execution-side architecture overview</li>
+<li><a href="https://github.com/category-labs/monad/blob/613698c24cec49da31ae7d383307916876265070/cmd/monad/main.cpp"><code>cmd/monad/main.cpp</code></a>: execution daemon assembly</li>
+<li><a href="https://github.com/category-labs/monad/blob/613698c24cec49da31ae7d383307916876265070/cmd/monad/runloop_monad.cpp"><code>cmd/monad/runloop_monad.cpp</code></a>: ordered-block ingestion and execution loop</li>
+</ul>
+<h2 id="then-open-these">Then Open These<a class="heading-anchor" aria-label="Link to this section" href="#then-open-these">#</a></h2>
+<ul>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-node/src/main.rs"><code>monad-node/src/main.rs</code></a>: consensus-side node wiring and execution delay constant</li>
+<li><a href="https://github.com/category-labs/monad/blob/613698c24cec49da31ae7d383307916876265070/rust/crates/monad-triedb/src/lib.rs"><code>monad/rust/crates/monad-triedb/src/lib.rs</code></a>: hosted triedb bridge</li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-rpc/src/data/mod.rs"><code>monad-rpc/src/data/mod.rs</code></a>: one Rust-side consumer of execution-owned outputs</li>
+</ul>
+<h2 id="what-to-remember">What To Remember<a class="heading-anchor" aria-label="Link to this section" href="#what-to-remember">#</a></h2>
+<ul>
+<li>Monad execution lives in a separate repo and often in a separate process.</li>
+<li>The execution repo owns a shared execution core reused in daemon and hosted modes.</li>
+<li>Repo, process, IPC, FFI, and live-output boundaries all matter, and they are not interchangeable.</li>
+<li>The execution daemon is not the validator’s external network identity.</li>
+<li>The cleanest runtime picture is: consensus writes ordered blocks, execution consumes them later, and the rest of the node consumes execution outputs after that.</li>
+</ul>
+<p>The next chapter stops looking at the boundary from far away and asks a more concrete question: what exact block model and state-transition rules does execution actually apply?</p>  </article> <nav class="chapter-nav" aria-label="Chapter navigation"><div class="chapter-nav-item"><a href="/monad-client-book/05-chain-config-forkpoints-and-sync/"><span class="chapter-nav-label">Previous</span>
+← Chapter 5: Chain Config, Forkpoints, Restart, and Sync</a></div><div class="chapter-nav-item chapter-nav-item-next"><a href="/monad-client-book/07-execution-data-model-and-state-transition/"><span class="chapter-nav-label">Next</span>Chapter 7: Execution Data Model and State Transition →
+</a></div></nav> </main> <aside class="chapter-tools"> <section class="tools-panel" aria-label="Table of contents"> <h2>On this page</h2> <ul class="toc-list"> <li> <a class="toc-link depth-2" href="#why-this-chapter-matters"> Why This Chapter Matters </a> </li><li> <a class="toc-link depth-2" href="#61-the-split-at-a-glance"> 6.1 The Split At A Glance </a> </li><li> <a class="toc-link depth-2" href="#62-libmonad_execution-is-the-shared-execution-core"> 6.2 libmonad_execution Is The Shared Execution Core </a> </li><li> <a class="toc-link depth-2" href="#63-there-is-more-than-one-boundary"> 6.3 There Is More Than One Boundary </a> </li><li> <a class="toc-link depth-2" href="#64-why-monad-bft-still-contains-monad-execution"> 6.4 Why monad-bft Still Contains monad-execution/ </a> </li><li> <a class="toc-link depth-2" href="#65-the-three-main-ways-execution-is-consumed"> 6.5 The Three Main Ways Execution Is Consumed </a> </li><li> <a class="toc-link depth-3" href="#stand-alone-daemon-mode"> Stand-Alone Daemon Mode </a> </li><li> <a class="toc-link depth-3" href="#hosted-library-mode"> Hosted Library Mode </a> </li><li> <a class="toc-link depth-3" href="#output-surface-mode"> Output-Surface Mode </a> </li><li> <a class="toc-link depth-2" href="#66-the-execution-daemon-is-not-the-nodes-network-identity"> 6.6 The Execution Daemon Is Not The Node’s Network Identity </a> </li><li> <a class="toc-link depth-2" href="#67-the-main-runtime-loop"> 6.7 The Main Runtime Loop </a> </li><li> <a class="toc-link depth-2" href="#68-one-transaction-across-the-boundary"> 6.8 One Transaction Across The Boundary </a> </li><li> <a class="toc-link depth-2" href="#69-what-each-consumption-mode-can-and-cannot-do"> 6.9 What Each Consumption Mode Can And Cannot Do </a> </li><li> <a class="toc-link depth-2" href="#610-the-execution-repo-is-larger-than-the-c-side"> 6.10 The Execution Repo Is Larger Than “The C++ Side” </a> </li><li> <a class="toc-link depth-2" href="#611-hosted-mode-does-not-erase-the-boundary"> 6.11 Hosted Mode Does Not Erase The Boundary </a> </li><li> <a class="toc-link depth-2" href="#612-architecture-current-code-current-caveat"> 6.12 Architecture, Current Code, Current Caveat </a> </li><li> <a class="toc-link depth-2" href="#open-these-files-first"> Open These Files First </a> </li><li> <a class="toc-link depth-2" href="#then-open-these"> Then Open These </a> </li><li> <a class="toc-link depth-2" href="#what-to-remember"> What To Remember </a> </li> </ul> </section> </aside> </div> <div class="mermaid-modal" data-mermaid-modal hidden role="dialog" aria-modal="true" aria-labelledby="mermaid-modal-title"> <div class="mermaid-modal-shell"> <div class="mermaid-modal-toolbar"> <p class="mermaid-modal-title" id="mermaid-modal-title">Diagram</p> <div class="mermaid-modal-actions"> <button type="button" class="mermaid-modal-action" data-mermaid-fit>
+Fit
+</button> <button type="button" class="mermaid-modal-action" data-mermaid-reset>
+Reset
+</button> <button type="button" class="mermaid-modal-action" data-mermaid-close aria-label="Close expanded diagram">
+Close
+</button> </div> </div> <div class="mermaid-modal-stage"> <div class="mermaid-modal-canvas" data-mermaid-canvas></div> </div> </div> </div> <script type="module" src="/monad-client-book/_astro/BookLayout.astro_astro_type_script_index_0_lang.Cmw0jMFF.js"></script> </body> </html>

@@ -1,0 +1,301 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="generator" content="Astro v6.1.9"><title>Chapter 8: Execution Services — Triedb, Event Rings, and Hosted APIs</title><meta property="og:title" content="Chapter 8: Execution Services — Triedb, Event Rings, and Hosted APIs"><meta property="og:image" content="https://mmv08.github.io/monad-client-book/og-image.png"><link rel="stylesheet" href="/monad-client-book/_astro/book.np3A6oR_.css"></head> <body data-has-toc="true" data-has-mermaid="true"> <button class="menu-toggle" id="menuToggle" aria-label="Toggle menu">☰</button> <div class="page "> <aside class="sidebar" id="sidebar"> <p class="sidebar-title"><a href="/monad-client-book/">Monad Client Book</a></p> <nav> <ul> <li> <a href="/monad-client-book/00-introduction/" class> The Monad Client: A Bottom-Up Code Walkthrough </a> </li><li> <a href="/monad-client-book/01-foundation-types-and-crypto/" class> Chapter 1: Foundation — Types and Cryptography </a> </li><li> <a href="/monad-client-book/02-validators-epochs-and-leader-election/" class> Chapter 2: Validators, Epochs, and Leader Election </a> </li><li> <a href="/monad-client-book/03-consensus-data-structures/" class> Chapter 3: Consensus Data Structures </a> </li><li> <a href="/monad-client-book/04-the-consensus-protocol/" class> Chapter 4: The Consensus Protocol </a> </li><li> <a href="/monad-client-book/05-chain-config-forkpoints-and-sync/" class> Chapter 5: Chain Config, Forkpoints, Restart, and Sync </a> </li><li> <a href="/monad-client-book/06-execution-and-evm/" class> Chapter 6: Execution Boundary and Process Architecture </a> </li><li> <a href="/monad-client-book/07-execution-data-model-and-state-transition/" class> Chapter 7: Execution Data Model and State Transition </a> </li><li> <a href="/monad-client-book/08-execution-services-triedb-events-and-hosted-apis/" class="active"> Chapter 8: Execution Services — Triedb, Event Rings, and Hosted APIs </a> </li><li> <a href="/monad-client-book/09-transaction-pool-and-fee-market/" class> Chapter 9: Transaction Pool and Fee Market </a> </li><li> <a href="/monad-client-book/10-networking-and-p2p/" class> Chapter 10: Networking and Peer-to-Peer Communication </a> </li><li> <a href="/monad-client-book/11-storage-and-state/" class> Chapter 11: Storage and State </a> </li><li> <a href="/monad-client-book/12-node-assembly-and-rpc/" class> Chapter 12: Node Assembly and RPC </a> </li><li> <a href="/monad-client-book/13-failure-modes-and-defenses/" class> Chapter 13: Failure Modes and Defenses </a> </li><li> <a href="/monad-client-book/14-testing-and-simulation/" class> Chapter 14: Testing and Simulation </a> </li><li> <a href="/monad-client-book/15-how-monad-differs-from-ethereum/" class> Chapter 15: How Monad Differs From Ethereum </a> </li><li> <a href="/monad-client-book/16-glossary-timelines-and-reading-maps/" class> Appendix: Glossary, Timelines, and Reading Maps </a> </li> </ul> </nav> </aside> <main class="main"> <header class="page-header"> <h1>Chapter 8: Execution Services — Triedb, Event Rings, and Hosted APIs</h1> <div class="source-meta"> <span class="source-path">monad-client-book/08-execution-services-triedb-events-and-hosted-apis.md</span> <a class="source-link" href="https://github.com/mmv08/category-labs-notes/blob/main/monad-client-book/08-execution-services-triedb-events-and-hosted-apis.md" target="_blank" rel="noreferrer">
+View source →
+</a> </div> </header> <article class="book-content">  <p>The previous chapter ended at “execution produced an output.” This chapter asks the practical follow-up: how does the Rust side actually consume that output?</p>
+<p>There are four big pieces. <em>Triedb</em> is the durable recent execution database; it is also referred to as <em>MonadDB</em> in some docs and code, and the two names are the same system — a Merkle-trie-backed key-value store holding recent execution state and recent block-associated objects. Around triedb there are narrow and broad Rust-side adapters. The execution <em>event ring</em> is a shared-memory ring buffer that the execution daemon writes freshest execution events into, and that Rust-side consumers read from without blocking either side. And hosted execution APIs such as <code>eth_call</code> (the Ethereum JSON-RPC method for running a contract function in a sandboxed read-only call without sending a real transaction) round out the list. This chapter explains why not every “latest” answer comes from the same place.</p>
+<h2 id="why-this-chapter-matters">Why This Chapter Matters<a class="heading-anchor" aria-label="Link to this section" href="#why-this-chapter-matters">#</a></h2>
+<p>Engineers new to the codebase usually make one incorrect assumption first: that there is one database that answers everything. That is not how the node works. Recent execution state, freshest recent events, and long-term historical block data live on different surfaces and are consumed through different adapters. Once that clicks, the RPC chapter becomes much easier.</p>
+<p>If you only inspect one Rust module first, inspect <code>DataProvider</code> in <code>monad-rpc/src/data/mod.rs</code>. It is the narrowest place where recent buffers, triedb, and archive composition become concrete.</p>
+<h2 id="81-three-read-surfaces-not-one">8.1 Three Read Surfaces, Not One<a class="heading-anchor" aria-label="Link to this section" href="#81-three-read-surfaces-not-one">#</a></h2>
+<p>The cleanest starting table is this one:</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Surface</th><th>What it is best at</th><th>What it is not</th></tr></thead><tbody><tr><td>triedb</td><td>retained recent execution state and recent block-associated execution data</td><td>infinite historical state</td></tr><tr><td>event ring</td><td>freshest live execution updates</td><td>durable retained state</td></tr><tr><td>archive</td><td>older blocks, receipts, traces, and indexes</td><td>general old-world-state reconstruction</td></tr></tbody></table>
+<p>The rest of the chapter just makes that table concrete.</p>
+<h2 id="82-triedb-is-the-durable-recent-execution-database">8.2 Triedb Is The Durable Recent Execution Database<a class="heading-anchor" aria-label="Link to this section" href="#82-triedb-is-the-durable-recent-execution-database">#</a></h2>
+<p>Triedb is the answer to questions like “what is the current retained balance of this account?”, “what code is currently at this address?”, “what recent receipt belongs to this transaction?”, and “what recent header belongs to this hash?”</p>
+<p>The important word is <em>retained</em>. Triedb is recent-state infrastructure, not an unlimited historical archive.</p>
+<h3 id="main-namespaces">Main Namespaces<a class="heading-anchor" aria-label="Link to this section" href="#main-namespaces">#</a></h3>
+<p>A <em>nibble</em> is half a byte, or 4 bits. Triedb is a Merkle-Patricia-style trie whose paths are walked half-byte at a time, so keys are partitioned into logical namespaces by their leading nibble. The schema documented in the execution repo and mirrored in <a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/docs/storage_paths.md"><code>docs/storage_paths.md</code></a> is:</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Prefix nibble</th><th>Meaning</th></tr></thead><tbody><tr><td><code>0</code></td><td>state</td></tr><tr><td><code>1</code></td><td>code</td></tr><tr><td><code>2</code></td><td>receipts</td></tr><tr><td><code>3</code></td><td>transactions</td></tr><tr><td><code>4</code></td><td>block header</td></tr><tr><td><code>5</code></td><td>withdrawals</td></tr><tr><td><code>6</code></td><td>ommers</td></tr><tr><td><code>7</code></td><td>tx-hash lookup</td></tr><tr><td><code>8</code></td><td>block-hash lookup</td></tr><tr><td><code>9</code></td><td>call frames</td></tr></tbody></table>
+<p>That list matters because it shows triedb is more than “world state.” It also stores recent block-oriented objects RPC cares about.</p>
+<h2 id="83-consensus-reads-triedb-through-a-narrow-worker-thread-boundary">8.3 Consensus Reads Triedb Through A Narrow Worker-Thread Boundary<a class="heading-anchor" aria-label="Link to this section" href="#83-consensus-reads-triedb-through-a-narrow-worker-thread-boundary">#</a></h2>
+<p>Consensus is intentionally not allowed to poke triedb from arbitrary places. The main path is:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="text"><code><span class="line"><span>MonadState</span></span>
+<span class="line"><span>  -> StateBackend trait</span></span>
+<span class="line"><span>  -> StateBackendThreadClient</span></span>
+<span class="line"><span>  -> StateBackendCache</span></span>
+<span class="line"><span>  -> TriedbReader</span></span>
+<span class="line"><span>  -> triedb</span></span></code></pre>
+<p>This shape gives consensus two things: blocking reads move off the main async event path, and repeated reads can hit a small cache first.</p>
+<h3 id="statebackendthreadclient-is-deliberately-small-and-bounded"><code>StateBackendThreadClient</code> Is Deliberately Small And Bounded<a class="heading-anchor" aria-label="Link to this section" href="#statebackendthreadclient-is-deliberately-small-and-bounded">#</a></h3>
+<p>The implementation uses one dedicated worker thread, a synchronous caller surface, and a bounded request channel with <code>MAX_INFLIGHT_REQUESTS = 16</code>. That limit is not a random tuning detail — it exists so state access cannot sprawl across consensus code and silently become an unbounded backpressure risk. This is a good example of a design that is simultaneously architectural, operational, and defensive.</p>
+<h3 id="the-special-validator-set-read">The Special Validator-Set Read<a class="heading-anchor" aria-label="Link to this section" href="#the-special-validator-set-read">#</a></h3>
+<p>One especially important request here is <code>read_valset_at_block(...)</code>. That is not a generic key lookup — it is the dedicated bridge into the execution-side staking reader from the last chapter.</p>
+<h2 id="84-rpc-uses-a-broader-adapter-triedbenv">8.4 RPC Uses A Broader Adapter: <code>TriedbEnv</code><a class="heading-anchor" aria-label="Link to this section" href="#84-rpc-uses-a-broader-adapter-triedbenv">#</a></h2>
+<p>RPC needs a richer read surface than consensus, so it uses a richer adapter. <code>TriedbEnv</code> does more than expose point reads: it maintains latest finalized, voted, and proposed block metadata, runs a polling path that keeps those keys fresh, and holds small hot-object caches.</p>
+<p>That makes the division clean. <code>TriedbReader</code> is the narrow consensus-facing surface; <code>TriedbEnv</code> is the broader RPC-facing surface. This is why not every triedb consumer sees the same interface even though the underlying database is the same.</p>
+<h2 id="85-hosted-eth_call-is-its-own-execution-path">8.5 Hosted <code>eth_call</code> Is Its Own Execution Path<a class="heading-anchor" aria-label="Link to this section" href="#85-hosted-eth_call-is-its-own-execution-path">#</a></h2>
+<p><code>eth_call</code> is the hosted execution service that makes this boundary easiest to see. The execution repo exposes a dedicated RPC executor interface under <code>category/rpc/monad_executor.*</code>, and on the Rust side, <code>monad-rpc</code> wraps it through <code>EthCallHandler</code>. That handler is configured with separate pools such as a low-gas pool, a high-gas pool, and block-oriented context resolution, and it also applies concurrency backpressure.</p>
+<p>So <code>eth_call</code> is not best understood as a thin synchronous FFI jump. It is better understood as a hosted execution subsystem with its own scheduling and result-shaping concerns.</p>
+<h2 id="86-the-event-ring-is-a-live-stream-not-a-database">8.6 The Event Ring Is A Live Stream, Not A Database<a class="heading-anchor" aria-label="Link to this section" href="#86-the-event-ring-is-a-live-stream-not-a-database">#</a></h2>
+<p>The execution event ring is the freshest output surface. At a high level, the execution daemon publishes events into a shared ring, and Rust-side code subscribes to those events. This is the right surface for subscriptions, very recent block or receipt visibility, and recent event buffering. It is not the durable recent database. That distinction is a mental model the later RPC chapter depends on.</p>
+<h2 id="87-live-stream-guarantees-fresh-but-gap-sensitive">8.7 Live-Stream Guarantees: Fresh, But Gap-Sensitive<a class="heading-anchor" aria-label="Link to this section" href="#87-live-stream-guarantees-fresh-but-gap-sensitive">#</a></h2>
+<p>This is the part many walkthroughs skip. The event ring is not only fresher than triedb — it is also gap-sensitive.</p>
+<p>In current code, WebSocket handlers treat <code>Gap</code> as fatal for that subscription stream, WebSocket handlers also close when they lag the broadcast channel badly enough, and <code>ExecEventsBuffer</code> itself ignores <code>Gap</code> on insert because it is only a recent cache, not a replay protocol. So the event ring should be understood as a live feed, not a durable canonical replay log. That distinction matters a lot for subscription reasoning.</p>
+<blockquote>
+<p><strong>Do not over-read the buffer</strong>
+<code>ExecEventsBuffer</code> ignoring <code>Gap</code> means “keep the freshest cache entries you still have.”
+It does not mean the node proved continuity of the stream.</p>
+</blockquote>
+<h2 id="88-execeventsbuffer-is-one-bounded-in-memory-cache">8.8 <code>ExecEventsBuffer</code> Is One Bounded In-Memory Cache<a class="heading-anchor" aria-label="Link to this section" href="#88-execeventsbuffer-is-one-bounded-in-memory-cache">#</a></h2>
+<p>The event buffer in <code>monad-rpc</code> is easy to describe incorrectly. It is not one proposed database plus one voted database plus one finalized database. It is one bounded in-memory recent buffer, keyed by block height, block hash, and tx hash, plus three latest-height trackers for proposed, voted, and finalized.</p>
+<h3 id="what-happens-on-insert">What Happens On Insert<a class="heading-anchor" aria-label="Link to this section" href="#what-happens-on-insert">#</a></h3>
+<p>When a new block event arrives, the buffer ignores <code>Verified</code> events entirely, updates the latest proposed/voted/finalized atomics, stores the full recent block by height, stores the block-hash-to-height lookup, and stores the tx-hash-to-receipt location lookup. If another block later arrives at the same height, the old same-height block can be replaced. That tells you exactly what this buffer is — a bounded recent live cache, not a stable historical store.</p>
+<h2 id="89-triedb-versus-event-ring">8.9 Triedb Versus Event Ring<a class="heading-anchor" aria-label="Link to this section" href="#89-triedb-versus-event-ring">#</a></h2>
+<p>This is the shortest reliable comparison:</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Question</th><th>Freshest useful source</th><th>Authoritative retained source</th></tr></thead><tbody><tr><td>what should I push to subscribers right now?</td><td>event ring or <code>ExecEventsBuffer</code></td><td>live stream plus recent cache</td></tr><tr><td>what is the retained current balance or storage slot?</td><td>n/a</td><td>triedb</td></tr><tr><td>what is the recent receipt for this tx?</td><td><code>ExecEventsBuffer</code> first</td><td>triedb after that</td></tr><tr><td>what is the old receipt for this tx?</td><td>usually none</td><td>archive</td></tr></tbody></table>
+<p>That is why “freshest” and “authoritative retained state” are not always the same thing.</p>
+<h2 id="810-dataprovider-is-a-runtime-composition-layer">8.10 <code>DataProvider</code> Is A Runtime Composition Layer<a class="heading-anchor" aria-label="Link to this section" href="#810-dataprovider-is-a-runtime-composition-layer">#</a></h2>
+<p><code>DataProvider</code> in <code>monad-rpc/src/data/mod.rs</code> is the object that combines:</p>
+<ul>
+<li>optional recent event buffering</li>
+<li>triedb access</li>
+<li>optional archive access</li>
+</ul>
+<p>In the main RPC startup path, it is constructed like this:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="rust"><code><span class="line"><span style="color:#F97583">let</span><span style="color:#E1E4E8"> data_provider </span><span style="color:#F97583">=</span><span style="color:#E1E4E8"> triedb_env</span><span style="color:#F97583">.</span><span style="color:#B392F0">map</span><span style="color:#E1E4E8">(</span><span style="color:#F97583">|</span><span style="color:#E1E4E8">t</span><span style="color:#F97583">|</span><span style="color:#B392F0"> DataProvider</span><span style="color:#F97583">::</span><span style="color:#B392F0">new</span><span style="color:#E1E4E8">(event_buffer, t, archive_reader));</span></span></code></pre>
+<p>That wording matters.</p>
+<blockquote>
+<p><strong>Current code</strong>
+In the main RPC startup path, the combined <code>DataProvider</code> exists only when triedb exists.</p>
+</blockquote>
+<blockquote>
+<p><strong>Runtime assembly fact</strong>
+This is true of the main <code>monad-rpc</code> wiring in this checkout.</p>
+</blockquote>
+<blockquote>
+<p><strong>Current caveat</strong>
+The type itself can still be constructed directly in tests with mock triedb-like implementations, so this is not a type-system impossibility.</p>
+</blockquote>
+<h2 id="811-popular-rpc-methods-map-to-different-backing-surfaces">8.11 Popular RPC Methods Map To Different Backing Surfaces<a class="heading-anchor" aria-label="Link to this section" href="#811-popular-rpc-methods-map-to-different-backing-surfaces">#</a></h2>
+<p>One explicit matrix is worth keeping handy.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Method or query shape</th><th>Main path today</th></tr></thead><tbody><tr><td><code>eth_blockNumber</code></td><td>triedb metadata only; latest proposed height from triedb</td></tr><tr><td><code>eth_getBalance</code></td><td>triedb only; no general archive fallback for old state</td></tr><tr><td><code>eth_getCode</code></td><td>triedb only; no general archive fallback for old code</td></tr><tr><td><code>eth_getTransactionReceipt</code></td><td><code>ExecEventsBuffer</code> -> triedb -> archive</td></tr><tr><td><code>eth_getTransactionByHash</code></td><td><code>ExecEventsBuffer</code> -> triedb -> archive</td></tr><tr><td><code>eth_getLogs</code></td><td>recent path from buffer or triedb, older path may use archive indexes as prefilter and archive receipts as truth</td></tr><tr><td><code>eth_call</code></td><td><code>TriedbEnv</code> resolves block context, then hosted execution runs</td></tr></tbody></table>
+<p>That table is one of the quickest ways to stop hand-waving about “the RPC database.”</p>
+<h2 id="812-why-eth_blocknumber-prefers-triedb">8.12 Why <code>eth_blockNumber</code> Prefers Triedb<a class="heading-anchor" aria-label="Link to this section" href="#812-why-eth_blocknumber-prefers-triedb">#</a></h2>
+<p>This specific example captures the design philosophy well. <code>DataProvider::get_latest_block_number()</code> returns triedb’s latest proposed block number, not the freshest event-buffer height.</p>
+<p>The reason is consistency. A wallet that calls <code>eth_blockNumber</code> and then immediately calls <code>eth_getBalance</code> should land on a block context the server can actually answer authoritatively from its retained recent-state surface. So the client prefers a slightly less aggressive notion of latest over cross-method inconsistency.</p>
+<h2 id="813-archive-is-not-a-general-state-fallback">8.13 Archive Is Not A General State Fallback<a class="heading-anchor" aria-label="Link to this section" href="#813-archive-is-not-a-general-state-fallback">#</a></h2>
+<p>Archive is covered in more detail in the storage chapter, but one fact belongs here already because it directly affects RPC reasoning. Archive can answer old blocks, old receipts, old traces, and tx-index lookups. Archive does not generally reconstruct old balances, old storage slots, old code, or old nonces. That is why state queries and history queries have different failure modes.</p>
+<h2 id="814-architecture-current-code-current-caveat">8.14 Architecture, Current Code, Current Caveat<a class="heading-anchor" aria-label="Link to this section" href="#814-architecture-current-code-current-caveat">#</a></h2>
+<blockquote>
+<p><strong>Architecture</strong>
+Execution publishes two main read surfaces: durable retained recent state in triedb, and freshest live events in the event ring.</p>
+</blockquote>
+<blockquote>
+<p><strong>Current code</strong>
+Consensus uses a narrow worker-thread triedb boundary, while RPC uses <code>TriedbEnv</code>, optional recent buffering, and optional archive readers through <code>DataProvider</code>.</p>
+</blockquote>
+<blockquote>
+<p><strong>Current caveat</strong>
+The same high-level method may read from different backends depending on freshness, retention, and which optional resources are configured at runtime.</p>
+</blockquote>
+<h2 id="815-one-bridge-diagram">8.15 One Bridge Diagram<a class="heading-anchor" aria-label="Link to this section" href="#815-one-bridge-diagram">#</a></h2>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="mermaid"><code><span class="line"><span style="color:#E1E4E8">flowchart LR</span></span>
+<span class="line"><span style="color:#E1E4E8">    subgraph Execution["execution repo"]</span></span>
+<span class="line"><span style="color:#E1E4E8">        Exec["execution daemon"]</span></span>
+<span class="line"><span style="color:#E1E4E8">        DB["triedb"]</span></span>
+<span class="line"><span style="color:#E1E4E8">        API["hosted execution APIs"]</span></span>
+<span class="line"><span style="color:#E1E4E8">        Ring["execution event ring"]</span></span>
+<span class="line"><span style="color:#E1E4E8">    end</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#E1E4E8">    subgraph Rust["monad-bft"]</span></span>
+<span class="line"><span style="color:#E1E4E8">        Consensus["consensus state backend"]</span></span>
+<span class="line"><span style="color:#E1E4E8">        RPC["RPC data provider"]</span></span>
+<span class="line"><span style="color:#E1E4E8">        Buffer["ExecEventsBuffer"]</span></span>
+<span class="line"><span style="color:#E1E4E8">    end</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#E1E4E8">    Exec --> DB</span></span>
+<span class="line"><span style="color:#E1E4E8">    Exec --> Ring</span></span>
+<span class="line"><span style="color:#E1E4E8">    API --> DB</span></span>
+<span class="line"><span style="color:#E1E4E8">    Consensus --> API</span></span>
+<span class="line"><span style="color:#E1E4E8">    RPC --> API</span></span>
+<span class="line"><span style="color:#E1E4E8">    RPC --> DB</span></span>
+<span class="line"><span style="color:#E1E4E8">    Ring --> Buffer</span></span>
+<span class="line"><span style="color:#E1E4E8">    Buffer --> RPC</span></span></code></pre>
+<p>That is the bridge between the two repos in daily node operation.</p>
+<h2 id="open-these-files-first">Open These Files First<a class="heading-anchor" aria-label="Link to this section" href="#open-these-files-first">#</a></h2>
+<ul>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-rpc/src/data/mod.rs"><code>monad-rpc/src/data/mod.rs</code></a>: <code>DataProvider</code>, recent-vs-retained read selection, <code>get_latest_block_number</code></li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-rpc/src/data/buffer.rs"><code>monad-rpc/src/data/buffer.rs</code></a>: <code>ExecEventsBuffer::insert</code></li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-state-backend/src/thread.rs"><code>monad-state-backend/src/thread.rs</code></a>: narrow consensus-side triedb worker boundary</li>
+</ul>
+<h2 id="then-open-these">Then Open These<a class="heading-anchor" aria-label="Link to this section" href="#then-open-these">#</a></h2>
+<ul>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-triedb-utils/src/triedb_env.rs"><code>monad-triedb-utils/src/triedb_env.rs</code></a>: RPC-facing triedb metadata and polling</li>
+<li><a href="https://github.com/category-labs/monad/blob/613698c24cec49da31ae7d383307916876265070/category/rpc/monad_executor.h"><code>category/rpc/monad_executor.h</code></a>: hosted execution interface for <code>eth_call</code></li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-rpc/src/websocket/handler.rs"><code>monad-rpc/src/websocket/handler.rs</code></a>: subscription filtering, gap handling, and commit-state exposure</li>
+</ul>
+<h2 id="then-keep-these-nearby">Then Keep These Nearby<a class="heading-anchor" aria-label="Link to this section" href="#then-keep-these-nearby">#</a></h2>
+<ul>
+<li><a href="/monad-client-book/16-glossary-timelines-and-reading-maps#freshness-and-read-surfaces-cheat-sheet">Freshness And Read Surfaces Cheat Sheet</a></li>
+<li><a href="/monad-client-book/16-glossary-timelines-and-reading-maps#one-practical-rpc-matrix">One Practical RPC Matrix</a></li>
+</ul>
+<h2 id="what-to-remember">What To Remember<a class="heading-anchor" aria-label="Link to this section" href="#what-to-remember">#</a></h2>
+<ul>
+<li>Triedb is the durable recent execution database.</li>
+<li>The event ring is a live stream, not the same thing as triedb.</li>
+<li><code>ExecEventsBuffer</code> is one bounded recent cache with commit-state trackers, not three separate databases.</li>
+<li>Consensus reads execution state through a narrow worker-thread boundary on purpose.</li>
+<li>RPC uses a broader adapter and composes recent buffer, triedb, and archive differently for different methods.</li>
+<li><code>eth_blockNumber</code> intentionally prefers triedb’s latest proposed height for cross-method consistency.</li>
+<li>Subscriptions are fed by a live stream that is fresher than triedb but also gap-sensitive.</li>
+<li>Archive is a fallback for some historical query classes, not a general historical state engine.</li>
+</ul>
+<p>The next chapter returns to the Rust side and shows how the txpool sits on top of many of these execution ideas.</p>  </article> <nav class="chapter-nav" aria-label="Chapter navigation"><div class="chapter-nav-item"><a href="/monad-client-book/07-execution-data-model-and-state-transition/"><span class="chapter-nav-label">Previous</span>
+← Chapter 7: Execution Data Model and State Transition</a></div><div class="chapter-nav-item chapter-nav-item-next"><a href="/monad-client-book/09-transaction-pool-and-fee-market/"><span class="chapter-nav-label">Next</span>Chapter 9: Transaction Pool and Fee Market →
+</a></div></nav> </main> <aside class="chapter-tools"> <section class="tools-panel" aria-label="Table of contents"> <h2>On this page</h2> <ul class="toc-list"> <li> <a class="toc-link depth-2" href="#why-this-chapter-matters"> Why This Chapter Matters </a> </li><li> <a class="toc-link depth-2" href="#81-three-read-surfaces-not-one"> 8.1 Three Read Surfaces, Not One </a> </li><li> <a class="toc-link depth-2" href="#82-triedb-is-the-durable-recent-execution-database"> 8.2 Triedb Is The Durable Recent Execution Database </a> </li><li> <a class="toc-link depth-3" href="#main-namespaces"> Main Namespaces </a> </li><li> <a class="toc-link depth-2" href="#83-consensus-reads-triedb-through-a-narrow-worker-thread-boundary"> 8.3 Consensus Reads Triedb Through A Narrow Worker-Thread Boundary </a> </li><li> <a class="toc-link depth-3" href="#statebackendthreadclient-is-deliberately-small-and-bounded"> StateBackendThreadClient Is Deliberately Small And Bounded </a> </li><li> <a class="toc-link depth-3" href="#the-special-validator-set-read"> The Special Validator-Set Read </a> </li><li> <a class="toc-link depth-2" href="#84-rpc-uses-a-broader-adapter-triedbenv"> 8.4 RPC Uses A Broader Adapter: TriedbEnv </a> </li><li> <a class="toc-link depth-2" href="#85-hosted-eth_call-is-its-own-execution-path"> 8.5 Hosted eth_call Is Its Own Execution Path </a> </li><li> <a class="toc-link depth-2" href="#86-the-event-ring-is-a-live-stream-not-a-database"> 8.6 The Event Ring Is A Live Stream, Not A Database </a> </li><li> <a class="toc-link depth-2" href="#87-live-stream-guarantees-fresh-but-gap-sensitive"> 8.7 Live-Stream Guarantees: Fresh, But Gap-Sensitive </a> </li><li> <a class="toc-link depth-2" href="#88-execeventsbuffer-is-one-bounded-in-memory-cache"> 8.8 ExecEventsBuffer Is One Bounded In-Memory Cache </a> </li><li> <a class="toc-link depth-3" href="#what-happens-on-insert"> What Happens On Insert </a> </li><li> <a class="toc-link depth-2" href="#89-triedb-versus-event-ring"> 8.9 Triedb Versus Event Ring </a> </li><li> <a class="toc-link depth-2" href="#810-dataprovider-is-a-runtime-composition-layer"> 8.10 DataProvider Is A Runtime Composition Layer </a> </li><li> <a class="toc-link depth-2" href="#811-popular-rpc-methods-map-to-different-backing-surfaces"> 8.11 Popular RPC Methods Map To Different Backing Surfaces </a> </li><li> <a class="toc-link depth-2" href="#812-why-eth_blocknumber-prefers-triedb"> 8.12 Why eth_blockNumber Prefers Triedb </a> </li><li> <a class="toc-link depth-2" href="#813-archive-is-not-a-general-state-fallback"> 8.13 Archive Is Not A General State Fallback </a> </li><li> <a class="toc-link depth-2" href="#814-architecture-current-code-current-caveat"> 8.14 Architecture, Current Code, Current Caveat </a> </li><li> <a class="toc-link depth-2" href="#815-one-bridge-diagram"> 8.15 One Bridge Diagram </a> </li><li> <a class="toc-link depth-2" href="#open-these-files-first"> Open These Files First </a> </li><li> <a class="toc-link depth-2" href="#then-open-these"> Then Open These </a> </li><li> <a class="toc-link depth-2" href="#then-keep-these-nearby"> Then Keep These Nearby </a> </li><li> <a class="toc-link depth-2" href="#what-to-remember"> What To Remember </a> </li> </ul> </section> </aside> </div> <div class="mermaid-modal" data-mermaid-modal hidden role="dialog" aria-modal="true" aria-labelledby="mermaid-modal-title"> <div class="mermaid-modal-shell"> <div class="mermaid-modal-toolbar"> <p class="mermaid-modal-title" id="mermaid-modal-title">Diagram</p> <div class="mermaid-modal-actions"> <button type="button" class="mermaid-modal-action" data-mermaid-fit>
+Fit
+</button> <button type="button" class="mermaid-modal-action" data-mermaid-reset>
+Reset
+</button> <button type="button" class="mermaid-modal-action" data-mermaid-close aria-label="Close expanded diagram">
+Close
+</button> </div> </div> <div class="mermaid-modal-stage"> <div class="mermaid-modal-canvas" data-mermaid-canvas></div> </div> </div> </div> <script type="module" src="/monad-client-book/_astro/BookLayout.astro_astro_type_script_index_0_lang.Cmw0jMFF.js"></script> </body> </html>

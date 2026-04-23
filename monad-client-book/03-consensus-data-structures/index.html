@@ -1,0 +1,221 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="generator" content="Astro v6.1.9"><title>Chapter 3: Consensus Data Structures</title><meta property="og:title" content="Chapter 3: Consensus Data Structures"><meta property="og:image" content="https://mmv08.github.io/monad-client-book/og-image.png"><link rel="stylesheet" href="/monad-client-book/_astro/book.np3A6oR_.css"></head> <body data-has-toc="true" data-has-mermaid="true"> <button class="menu-toggle" id="menuToggle" aria-label="Toggle menu">☰</button> <div class="page "> <aside class="sidebar" id="sidebar"> <p class="sidebar-title"><a href="/monad-client-book/">Monad Client Book</a></p> <nav> <ul> <li> <a href="/monad-client-book/00-introduction/" class> The Monad Client: A Bottom-Up Code Walkthrough </a> </li><li> <a href="/monad-client-book/01-foundation-types-and-crypto/" class> Chapter 1: Foundation — Types and Cryptography </a> </li><li> <a href="/monad-client-book/02-validators-epochs-and-leader-election/" class> Chapter 2: Validators, Epochs, and Leader Election </a> </li><li> <a href="/monad-client-book/03-consensus-data-structures/" class="active"> Chapter 3: Consensus Data Structures </a> </li><li> <a href="/monad-client-book/04-the-consensus-protocol/" class> Chapter 4: The Consensus Protocol </a> </li><li> <a href="/monad-client-book/05-chain-config-forkpoints-and-sync/" class> Chapter 5: Chain Config, Forkpoints, Restart, and Sync </a> </li><li> <a href="/monad-client-book/06-execution-and-evm/" class> Chapter 6: Execution Boundary and Process Architecture </a> </li><li> <a href="/monad-client-book/07-execution-data-model-and-state-transition/" class> Chapter 7: Execution Data Model and State Transition </a> </li><li> <a href="/monad-client-book/08-execution-services-triedb-events-and-hosted-apis/" class> Chapter 8: Execution Services — Triedb, Event Rings, and Hosted APIs </a> </li><li> <a href="/monad-client-book/09-transaction-pool-and-fee-market/" class> Chapter 9: Transaction Pool and Fee Market </a> </li><li> <a href="/monad-client-book/10-networking-and-p2p/" class> Chapter 10: Networking and Peer-to-Peer Communication </a> </li><li> <a href="/monad-client-book/11-storage-and-state/" class> Chapter 11: Storage and State </a> </li><li> <a href="/monad-client-book/12-node-assembly-and-rpc/" class> Chapter 12: Node Assembly and RPC </a> </li><li> <a href="/monad-client-book/13-failure-modes-and-defenses/" class> Chapter 13: Failure Modes and Defenses </a> </li><li> <a href="/monad-client-book/14-testing-and-simulation/" class> Chapter 14: Testing and Simulation </a> </li><li> <a href="/monad-client-book/15-how-monad-differs-from-ethereum/" class> Chapter 15: How Monad Differs From Ethereum </a> </li><li> <a href="/monad-client-book/16-glossary-timelines-and-reading-maps/" class> Appendix: Glossary, Timelines, and Reading Maps </a> </li> </ul> </nav> </aside> <main class="main"> <header class="page-header"> <h1>Chapter 3: Consensus Data Structures</h1> <div class="source-meta"> <span class="source-path">monad-client-book/03-consensus-data-structures.md</span> <a class="source-link" href="https://github.com/mmv08/category-labs-notes/blob/main/monad-client-book/03-consensus-data-structures.md" target="_blank" rel="noreferrer">
+View source →
+</a> </div> </header> <article class="book-content">  <p>Chapter 2 explained who is allowed to act.</p>
+<p>This chapter explains what those actors actually send.</p>
+<p>The main consensus objects are:</p>
+<ul>
+<li>votes</li>
+<li>quorum certificates</li>
+<li>block headers and full blocks</li>
+<li>tips and proposal messages</li>
+<li>timeout messages and timeout certificates</li>
+<li>recovery-side messages</li>
+<li>fresh-proposal certificates</li>
+<li>restart objects such as checkpoints</li>
+</ul>
+<p>If the previous chapter was about the social structure of consensus, this chapter is about its documents.</p>
+<h2 id="why-this-chapter-matters">Why This Chapter Matters<a class="heading-anchor" aria-label="Link to this section" href="#why-this-chapter-matters">#</a></h2>
+<p>Many later functions look intimidating only because they manipulate several proof objects at once. If you can answer four questions about an object — what statement is it making, who signed it, what threshold does it need, and what later object can it become — then the state-machine chapters get much easier.</p>
+<h2 id="31-vote">3.1 <code>Vote</code><a class="heading-anchor" aria-label="Link to this section" href="#31-vote">#</a></h2>
+<p>A vote is the smallest meaningful consensus statement, carrying a block ID, a round, and an epoch. Conceptually, it says, “In epoch <code>E</code>, during round <code>R</code>, I vote for block <code>B</code>.” That is intentionally small: the block carries the richer structure, and the vote carries the smallest statement needed to certify one block for one round.</p>
+<h2 id="32-quorumcertificate">3.2 <code>QuorumCertificate</code><a class="heading-anchor" aria-label="Link to this section" href="#32-quorumcertificate">#</a></h2>
+<p>A QC is one vote statement plus enough signatures over that exact vote. So the mental model is simple: the vote is the statement, and the QC is proof that enough stake signed that statement.</p>
+<h3 id="genesis-qc">Genesis QC<a class="heading-anchor" aria-label="Link to this section" href="#genesis-qc">#</a></h3>
+<p>Consensus needs a starting point, so the code provides a synthetic genesis QC. It anchors the genesis block ID, the genesis round, and epoch <code>1</code>. That lets the first real block extend a well-defined certified parent instead of special-casing “history starts here” everywhere.</p>
+<h3 id="why-the-commit-rule-needs-parent-precision">Why The Commit Rule Needs Parent Precision<a class="heading-anchor" aria-label="Link to this section" href="#why-the-commit-rule-needs-parent-precision">#</a></h3>
+<p>The code’s committable-block logic is more precise than the vague phrase “QC on QC.” The useful reader-level version is: a new QC certifies block <code>B</code>; block <code>B</code> itself carries a QC for parent <code>A</code>; and if the child certification has the required next-round relationship to the parent certification, then <code>A</code> becomes committable.</p>
+<p>So the key idea is not “some newer QC exists.” It is “a specific certified parent-child relationship exists.” That precision is why the commit rule is safe to automate.</p>
+<h2 id="33-proposal_round-versus-block_round">3.3 <code>proposal_round</code> Versus <code>block_round</code><a class="heading-anchor" aria-label="Link to this section" href="#33-proposal_round-versus-block_round">#</a></h2>
+<p>This distinction is essential.</p>
+<h3 id="block_round"><code>block_round</code><a class="heading-anchor" aria-label="Link to this section" href="#block_round">#</a></h3>
+<p><code>block_round</code> is the round in which the block was originally authored.</p>
+<h3 id="proposal_round"><code>proposal_round</code><a class="heading-anchor" aria-label="Link to this section" href="#proposal_round">#</a></h3>
+<p><code>proposal_round</code> is the round in which the current proposal message is being sent.</p>
+<h3 id="why-the-split-exists">Why The Split Exists<a class="heading-anchor" aria-label="Link to this section" href="#why-the-split-exists">#</a></h3>
+<p>Suppose block <code>B</code> was first proposed in round <code>10</code>, but recovery later decides <code>B</code> is still the right tip and re-sends it in round <code>12</code>. Then <code>block_round(B) = 10</code> while <code>proposal_round = 12</code>. That means the node has to validate two different leader claims: was <code>B</code> originally authored by the correct leader for round <code>10</code>, and is this current proposal message allowed to be sent by the leader for round <code>12</code>? Without that split, recovery paths stop making sense.</p>
+<h2 id="34-consensusblockheader">3.4 <code>ConsensusBlockHeader</code><a class="heading-anchor" aria-label="Link to this section" href="#34-consensusblockheader">#</a></h2>
+<p>The header is dense, but it becomes easier once you read it in layers.</p>
+<h3 id="layer-1-consensus-position">Layer 1: Consensus Position<a class="heading-anchor" aria-label="Link to this section" href="#layer-1-consensus-position">#</a></h3>
+<ul>
+<li><code>block_round</code></li>
+<li><code>epoch</code></li>
+<li><code>qc</code></li>
+<li><code>author</code></li>
+<li><code>seq_num</code></li>
+</ul>
+<p>This layer says where the block sits in consensus history and who authored it.</p>
+<h3 id="layer-2-time-and-round-linked-proof">Layer 2: Time And Round-Linked Proof<a class="heading-anchor" aria-label="Link to this section" href="#layer-2-time-and-round-linked-proof">#</a></h3>
+<ul>
+<li><code>timestamp_ns</code></li>
+<li><code>round_signature</code></li>
+</ul>
+<p>This is where the block carries a round-linked proof that execution later cares about too.</p>
+<h3 id="layer-3-delayed-execution-boundary">Layer 3: Delayed Execution Boundary<a class="heading-anchor" aria-label="Link to this section" href="#layer-3-delayed-execution-boundary">#</a></h3>
+<ul>
+<li><code>execution_inputs</code></li>
+<li><code>delayed_execution_results</code></li>
+</ul>
+<p>This is the first place where Monad’s delayed execution model becomes visible directly in the block format. The useful plain-English reading is that <code>execution_inputs</code> is what this block wants execution to do later, and <code>delayed_execution_results</code> is finalized execution output for older blocks whose delayed work has now matured. This is why a Monad header talks in two time directions at once — new work for this block, and completed work for earlier ordered blocks.</p>
+<h3 id="layer-4-payload-identity-and-fee-state">Layer 4: Payload Identity And Fee State<a class="heading-anchor" aria-label="Link to this section" href="#layer-4-payload-identity-and-fee-state">#</a></h3>
+<ul>
+<li><code>block_body_id</code></li>
+<li><code>base_fee</code></li>
+<li><code>base_fee_trend</code></li>
+<li><code>base_fee_moment</code></li>
+</ul>
+<p>This layer ties the header to the body payload and to the current fee-market state.</p>
+<h3 id="one-small-but-important-base_fee_trend-nuance">One Small But Important <code>base_fee_trend</code> Nuance<a class="heading-anchor" aria-label="Link to this section" href="#one-small-but-important-base_fee_trend-nuance">#</a></h3>
+<p>The code stores <code>base_fee_trend</code> as <code>u64</code>, but that unsigned field is just the storage and wire representation of a signed trend value. So the right mental model is: it is stored as unsigned, interpreted as signed movement encoded in two’s complement form, and cast back to signed form in fee math and debug formatting.</p>
+<p>You do not need the full math yet. You do need to notice that the header carries more fee-market state than a simple Ethereum-style single base fee.</p>
+<h2 id="35-consensusfullblock">3.5 <code>ConsensusFullBlock</code><a class="heading-anchor" aria-label="Link to this section" href="#35-consensusfullblock">#</a></h2>
+<p>The full block is header plus body. Construction enforces that the body’s actual ID matches the <code>block_body_id</code> claimed by the header, so header and body are separate types but not independent objects. That split exists because the node often wants to talk separately about block identity and ancestry on one hand and payload availability and payload sync on the other.</p>
+<h2 id="36-the-block-model-versus-the-proposal-wire-object">3.6 The Block Model Versus The Proposal Wire Object<a class="heading-anchor" aria-label="Link to this section" href="#36-the-block-model-versus-the-proposal-wire-object">#</a></h2>
+<p>This is another place where the code is more exact than the usual summary.</p>
+<h3 id="block-model">Block Model<a class="heading-anchor" aria-label="Link to this section" href="#block-model">#</a></h3>
+<p>The block model separates header and body. That helps with persistence, sync, staged validation, and typed code paths.</p>
+<h3 id="proposal-wire-object">Proposal Wire Object<a class="heading-anchor" aria-label="Link to this section" href="#proposal-wire-object">#</a></h3>
+<p>The ordinary proposal wire message carries the signed tip, the block body, and optionally the previous round’s TC — a <em>timeout certificate</em>, introduced in detail in §3.9, which is the aggregate proof that enough stake gave up on the previous round. So the proposal path is not “header now, body later”; on the normal wire path, both are present.</p>
+<h2 id="37-consensustip">3.7 <code>ConsensusTip</code><a class="heading-anchor" aria-label="Link to this section" href="#37-consensustip">#</a></h2>
+<p>The signed proposal object is not the raw header. It is the tip: a block header, an outer leader signature over the header, and an optional fresh-proposal certificate. This is one of the places where readers often flatten too much. A block can carry a round signature inside the header, an outer tip signature over the whole header, and later vote or timeout signatures over related statements — different proofs for different jobs.</p>
+<h2 id="38-timeout-objects">3.8 Timeout Objects<a class="heading-anchor" aria-label="Link to this section" href="#38-timeout-objects">#</a></h2>
+<p>Timeout recovery needs more context than a simple “I gave up.” That is why timeout objects carry which round timed out, the highest QC round the validator knew, possibly a higher reusable tip round the validator knew, the validator’s timeout signature, and optional piggybacked voting information.</p>
+<p>The key lesson is that timeouts do not only signal failure — they also carry recovery context. That is why a TC is richer than a QC.</p>
+<h2 id="39-timeout-certificates-and-high_extend">3.9 Timeout Certificates And <code>high_extend</code><a class="heading-anchor" aria-label="Link to this section" href="#39-timeout-certificates-and-high_extend">#</a></h2>
+<p>A TC is not just “2f+1 timeout signatures.” It also preserves enough structure to guide the next recovery step. The most important extra field is the recovery-side extension hint usually discussed through <code>high_extend</code>: it is not generic timeout context, it is the ranked best-known extension candidate carried through timeout aggregation, so recovery can first try to reuse the strongest known extension rather than going fresh too early.</p>
+<p>The compact mental model is that a QC proves enough stake signed one block vote statement, while a TC proves enough stake timed out one round and preserves the best known extension point those validators reported. That extension point is what recovery later tries to reuse before falling back to a truly fresh proposal.</p>
+<h2 id="310-recovery-messages">3.10 Recovery Messages<a class="heading-anchor" aria-label="Link to this section" href="#310-recovery-messages">#</a></h2>
+<p>Once a round times out, several smaller message types become important.</p>
+<h3 id="advanceroundmessage"><code>AdvanceRoundMessage</code><a class="heading-anchor" aria-label="Link to this section" href="#advanceroundmessage">#</a></h3>
+<p>This carries a QC or TC so peers can move their pacemakers forward quickly. It says, in effect, “here is round-ending evidence; advance if you trust it.”</p>
+<h3 id="roundrecoverymessage"><code>RoundRecoveryMessage</code><a class="heading-anchor" aria-label="Link to this section" href="#roundrecoverymessage">#</a></h3>
+<p>This asks the current leader to deal with a specific recovered tip after a timeout path. It is the “please judge this reusable tip candidate” message.</p>
+<h3 id="noendorsementmessage"><code>NoEndorsementMessage</code><a class="heading-anchor" aria-label="Link to this section" href="#noendorsementmessage">#</a></h3>
+<p>This says “I refuse to endorse reuse of this recovered tip.” Enough such refusals can later aggregate into a certificate.</p>
+<h2 id="311-nec-notipcertificate-and-freshproposalcertificate">3.11 <code>NEC</code>, <code>NoTipCertificate</code>, And <code>FreshProposalCertificate</code><a class="heading-anchor" aria-label="Link to this section" href="#311-nec-notipcertificate-and-freshproposalcertificate">#</a></h2>
+<p>This is the recovery-side cluster that needs the most careful reading.</p>
+<h3 id="nec"><code>NEC</code><a class="heading-anchor" aria-label="Link to this section" href="#nec">#</a></h3>
+<p><code>NEC</code> means <code>NoEndorsementCertificate</code>. It is threshold proof that enough stake refused endorsement of the same recovered tip. It does not mean “the round failed in the abstract” — it means something more precise: the attempted tip-reuse path was refused strongly enough that a fresh proposal path can now be justified.</p>
+<h3 id="notipcertificate"><code>NoTipCertificate</code><a class="heading-anchor" aria-label="Link to this section" href="#notipcertificate">#</a></h3>
+<p><code>NoTipCertificate</code> is the sibling concept: the “there is no reusable tip worth endorsing” proof. So the two fresh-proposal-enabling certificates are different:</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Certificate</th><th>What it says</th></tr></thead><tbody><tr><td><code>NEC</code></td><td>this recovered tip was actively refused</td></tr><tr><td><code>NoTipCertificate</code></td><td>there is no reusable tip to endorse at all</td></tr></tbody></table>
+<h3 id="freshproposalcertificate"><code>FreshProposalCertificate</code><a class="heading-anchor" aria-label="Link to this section" href="#freshproposalcertificate">#</a></h3>
+<p>This is the unifying type. In current code it is an enum, not one magical monolithic proof, with two variants: <code>FreshProposalCertificate::Nec(...)</code> and <code>FreshProposalCertificate::NoTip(...)</code>. That distinction matters because the leader is not always going fresh for the same reason — sometimes the reusable-tip path was explicitly refused, and sometimes there simply was no reusable-tip path worth endorsing.</p>
+<h2 id="312-the-recovery-decision-tree">3.12 The Recovery Decision Tree<a class="heading-anchor" aria-label="Link to this section" href="#312-the-recovery-decision-tree">#</a></h2>
+<p>This is the recovery subprotocol in one picture:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="mermaid"><code><span class="line"><span style="color:#E1E4E8">flowchart LR</span></span>
+<span class="line"><span style="color:#E1E4E8">    Timeout["validators timeout round r"] --> TC["TC(r) forms"]</span></span>
+<span class="line"><span style="color:#E1E4E8">    TC --> Reuse{"reusable tip?"}</span></span>
+<span class="line"><span style="color:#E1E4E8">    Reuse -->|yes| Reproposal["try reusing tip"]</span></span>
+<span class="line"><span style="color:#E1E4E8">    Reuse -->|no| NoTip["NoTip path"]</span></span>
+<span class="line"><span style="color:#E1E4E8">    Reproposal -->|endorsed| ReuseTip["repropose recovered tip"]</span></span>
+<span class="line"><span style="color:#E1E4E8">    Reproposal -->|refused| NEC["NEC forms"]</span></span>
+<span class="line"><span style="color:#E1E4E8">    NEC --> Fresh["fresh proposal allowed"]</span></span>
+<span class="line"><span style="color:#E1E4E8">    NoTip --> Fresh2["NoTipCertificate allows fresh proposal"]</span></span></code></pre>
+<p>Later chapters make the state-machine transitions precise.
+This chapter’s job is just to keep the object meanings straight.</p>
+<h2 id="313-signature-matrix">3.13 Signature Matrix<a class="heading-anchor" aria-label="Link to this section" href="#313-signature-matrix">#</a></h2>
+<p>This table is worth keeping nearby because the proposal path uses several of these at once.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Object</th><th>Signature role</th><th>What it proves</th></tr></thead><tbody><tr><td>outer <code>ConsensusMessage</code> envelope</td><td>outer recoverable signature</td><td>one validator sent this network message</td></tr><tr><td>outer <code>ConsensusTip</code> signature</td><td>outer recoverable signature</td><td>the original block-round leader signed this header as a tip</td></tr><tr><td><code>VoteMessage</code></td><td>certificate-style statement signature</td><td>one validator voted for one block in one round</td></tr><tr><td><code>Timeout</code> signature</td><td>certificate-style statement signature</td><td>one validator timed out one round</td></tr><tr><td><code>NoEndorsementMessage</code></td><td>certificate-style statement signature</td><td>one validator refused one recovered tip</td></tr><tr><td>QC / TC / NEC</td><td>aggregate threshold proof</td><td>enough stake signed the same statement</td></tr></tbody></table>
+<h2 id="314-blockpolicy-valid-is-not-the-same-thing-as-coherent">3.14 <code>BlockPolicy</code>: Valid Is Not The Same Thing As Coherent<a class="heading-anchor" aria-label="Link to this section" href="#314-blockpolicy-valid-is-not-the-same-thing-as-coherent">#</a></h2>
+<p>Consensus separates two questions: is this block valid, and is this block coherent with the chain and delayed-execution context? <code>BlockPolicy</code> is where the second question becomes concrete. That distinction matters because delayed execution means a block can be structurally valid enough to store but not yet coherent enough to vote on. This distinction drives later blocktree and voting behavior, and if you blur it away, later blocktree behavior becomes mysterious.</p>
+<h2 id="315-execution-side-mirrors">3.15 Execution-Side Mirrors<a class="heading-anchor" aria-label="Link to this section" href="#315-execution-side-mirrors">#</a></h2>
+<p>Execution mirrors these block shapes in C++ so the execution daemon can consume typed block data. The important nuance is that the mirror is close but also versioned. That matters for historical compatibility — the execution side does not pretend the block format was always identical across revisions.</p>
+<h2 id="316-checkpoints-roots-and-restart-state">3.16 Checkpoints, Roots, And Restart State<a class="heading-anchor" aria-label="Link to this section" href="#316-checkpoints-roots-and-restart-state">#</a></h2>
+<p>A restart anchor needs more than “latest block.” The relevant restart-side objects capture the current committed root, the highest carried round-ending certificate, and the bounded locked-epoch validator window needed to verify that certificate and survive nearby epoch transitions.</p>
+<h3 id="why-the-validator-window-is-bounded">Why The Validator Window Is Bounded<a class="heading-anchor" aria-label="Link to this section" href="#why-the-validator-window-is-bounded">#</a></h3>
+<p>The checkpoint does not need the whole historical validator schedule forever. It only needs enough nearby locked-epoch information to verify the carried high certificate, resume around the current root safely, and survive nearby epoch transition boundaries. That is why the stored window is bounded instead of unbounded historical metadata.</p>
+<h2 id="open-these-files-first">Open These Files First<a class="heading-anchor" aria-label="Link to this section" href="#open-these-files-first">#</a></h2>
+<ul>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-consensus-types/src/block.rs"><code>monad-consensus-types/src/block.rs</code></a>: header layers, body IDs, full-block construction</li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-consensus-types/src/voting.rs"><code>monad-consensus-types/src/voting.rs</code></a>: <code>Vote</code> and QC-friendly statement shapes</li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-consensus-types/src/timeout.rs"><code>monad-consensus-types/src/timeout.rs</code></a>: timeout objects, TCs, and timeout-side proof structure</li>
+</ul>
+<h2 id="then-open-these">Then Open These<a class="heading-anchor" aria-label="Link to this section" href="#then-open-these">#</a></h2>
+<ul>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-consensus-types/src/tip.rs"><code>monad-consensus-types/src/tip.rs</code></a>: <code>ConsensusTip</code></li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-consensus-types/src/no_endorsement.rs"><code>monad-consensus-types/src/no_endorsement.rs</code></a>: <code>NEC</code>, <code>NoTipCertificate</code>, <code>FreshProposalCertificate</code></li>
+<li><a href="https://github.com/category-labs/monad/blob/613698c24cec49da31ae7d383307916876265070/category/execution/monad/core/monad_block.hpp"><code>category/execution/monad/core/monad_block.hpp</code></a>: execution-side mirror of the block model</li>
+</ul>
+<h2 id="then-keep-these-reference-tables-nearby">Then Keep These Reference Tables Nearby<a class="heading-anchor" aria-label="Link to this section" href="#then-keep-these-reference-tables-nearby">#</a></h2>
+<ul>
+<li><a href="/monad-client-book/16-glossary-timelines-and-reading-maps#recovery-objects-at-a-glance">Recovery Objects At A Glance</a></li>
+<li><a href="/monad-client-book/16-glossary-timelines-and-reading-maps#the-canonical-delayed-execution-timeline">Canonical Delayed-Execution Timeline</a></li>
+</ul>
+<h2 id="what-to-remember">What To Remember<a class="heading-anchor" aria-label="Link to this section" href="#what-to-remember">#</a></h2>
+<ul>
+<li>A vote is one small protocol statement; a QC is threshold proof over that statement.</li>
+<li><code>proposal_round</code> and <code>block_round</code> are different because reproposal is a real path.</li>
+<li>Block headers carry delayed-execution structure directly.</li>
+<li>Tips add an outer leader signature on top of the block header.</li>
+<li>Timeout objects preserve recovery context, not just “failure happened.”</li>
+<li><code>NEC</code> means <code>NoEndorsementCertificate</code>.</li>
+<li><code>FreshProposalCertificate</code> is an enum carrying fresh-proposal authority, not one undifferentiated proof type.</li>
+<li><code>BlockPolicy</code> is where “coherent” becomes a real code distinction.</li>
+<li>Checkpoints keep a bounded validator window because restart safety only needs local validator context, not infinite validator history.</li>
+</ul>
+<p>The next chapter puts these objects in motion inside the state machine.</p>  </article> <nav class="chapter-nav" aria-label="Chapter navigation"><div class="chapter-nav-item"><a href="/monad-client-book/02-validators-epochs-and-leader-election/"><span class="chapter-nav-label">Previous</span>
+← Chapter 2: Validators, Epochs, and Leader Election</a></div><div class="chapter-nav-item chapter-nav-item-next"><a href="/monad-client-book/04-the-consensus-protocol/"><span class="chapter-nav-label">Next</span>Chapter 4: The Consensus Protocol →
+</a></div></nav> </main> <aside class="chapter-tools"> <section class="tools-panel" aria-label="Table of contents"> <h2>On this page</h2> <ul class="toc-list"> <li> <a class="toc-link depth-2" href="#why-this-chapter-matters"> Why This Chapter Matters </a> </li><li> <a class="toc-link depth-2" href="#31-vote"> 3.1 Vote </a> </li><li> <a class="toc-link depth-2" href="#32-quorumcertificate"> 3.2 QuorumCertificate </a> </li><li> <a class="toc-link depth-3" href="#genesis-qc"> Genesis QC </a> </li><li> <a class="toc-link depth-3" href="#why-the-commit-rule-needs-parent-precision"> Why The Commit Rule Needs Parent Precision </a> </li><li> <a class="toc-link depth-2" href="#33-proposal_round-versus-block_round"> 3.3 proposal_round Versus block_round </a> </li><li> <a class="toc-link depth-3" href="#block_round"> block_round </a> </li><li> <a class="toc-link depth-3" href="#proposal_round"> proposal_round </a> </li><li> <a class="toc-link depth-3" href="#why-the-split-exists"> Why The Split Exists </a> </li><li> <a class="toc-link depth-2" href="#34-consensusblockheader"> 3.4 ConsensusBlockHeader </a> </li><li> <a class="toc-link depth-3" href="#layer-1-consensus-position"> Layer 1: Consensus Position </a> </li><li> <a class="toc-link depth-3" href="#layer-2-time-and-round-linked-proof"> Layer 2: Time And Round-Linked Proof </a> </li><li> <a class="toc-link depth-3" href="#layer-3-delayed-execution-boundary"> Layer 3: Delayed Execution Boundary </a> </li><li> <a class="toc-link depth-3" href="#layer-4-payload-identity-and-fee-state"> Layer 4: Payload Identity And Fee State </a> </li><li> <a class="toc-link depth-3" href="#one-small-but-important-base_fee_trend-nuance"> One Small But Important base_fee_trend Nuance </a> </li><li> <a class="toc-link depth-2" href="#35-consensusfullblock"> 3.5 ConsensusFullBlock </a> </li><li> <a class="toc-link depth-2" href="#36-the-block-model-versus-the-proposal-wire-object"> 3.6 The Block Model Versus The Proposal Wire Object </a> </li><li> <a class="toc-link depth-3" href="#block-model"> Block Model </a> </li><li> <a class="toc-link depth-3" href="#proposal-wire-object"> Proposal Wire Object </a> </li><li> <a class="toc-link depth-2" href="#37-consensustip"> 3.7 ConsensusTip </a> </li><li> <a class="toc-link depth-2" href="#38-timeout-objects"> 3.8 Timeout Objects </a> </li><li> <a class="toc-link depth-2" href="#39-timeout-certificates-and-high_extend"> 3.9 Timeout Certificates And high_extend </a> </li><li> <a class="toc-link depth-2" href="#310-recovery-messages"> 3.10 Recovery Messages </a> </li><li> <a class="toc-link depth-3" href="#advanceroundmessage"> AdvanceRoundMessage </a> </li><li> <a class="toc-link depth-3" href="#roundrecoverymessage"> RoundRecoveryMessage </a> </li><li> <a class="toc-link depth-3" href="#noendorsementmessage"> NoEndorsementMessage </a> </li><li> <a class="toc-link depth-2" href="#311-nec-notipcertificate-and-freshproposalcertificate"> 3.11 NEC, NoTipCertificate, And FreshProposalCertificate </a> </li><li> <a class="toc-link depth-3" href="#nec"> NEC </a> </li><li> <a class="toc-link depth-3" href="#notipcertificate"> NoTipCertificate </a> </li><li> <a class="toc-link depth-3" href="#freshproposalcertificate"> FreshProposalCertificate </a> </li><li> <a class="toc-link depth-2" href="#312-the-recovery-decision-tree"> 3.12 The Recovery Decision Tree </a> </li><li> <a class="toc-link depth-2" href="#313-signature-matrix"> 3.13 Signature Matrix </a> </li><li> <a class="toc-link depth-2" href="#314-blockpolicy-valid-is-not-the-same-thing-as-coherent"> 3.14 BlockPolicy: Valid Is Not The Same Thing As Coherent </a> </li><li> <a class="toc-link depth-2" href="#315-execution-side-mirrors"> 3.15 Execution-Side Mirrors </a> </li><li> <a class="toc-link depth-2" href="#316-checkpoints-roots-and-restart-state"> 3.16 Checkpoints, Roots, And Restart State </a> </li><li> <a class="toc-link depth-3" href="#why-the-validator-window-is-bounded"> Why The Validator Window Is Bounded </a> </li><li> <a class="toc-link depth-2" href="#open-these-files-first"> Open These Files First </a> </li><li> <a class="toc-link depth-2" href="#then-open-these"> Then Open These </a> </li><li> <a class="toc-link depth-2" href="#then-keep-these-reference-tables-nearby"> Then Keep These Reference Tables Nearby </a> </li><li> <a class="toc-link depth-2" href="#what-to-remember"> What To Remember </a> </li> </ul> </section> </aside> </div> <div class="mermaid-modal" data-mermaid-modal hidden role="dialog" aria-modal="true" aria-labelledby="mermaid-modal-title"> <div class="mermaid-modal-shell"> <div class="mermaid-modal-toolbar"> <p class="mermaid-modal-title" id="mermaid-modal-title">Diagram</p> <div class="mermaid-modal-actions"> <button type="button" class="mermaid-modal-action" data-mermaid-fit>
+Fit
+</button> <button type="button" class="mermaid-modal-action" data-mermaid-reset>
+Reset
+</button> <button type="button" class="mermaid-modal-action" data-mermaid-close aria-label="Close expanded diagram">
+Close
+</button> </div> </div> <div class="mermaid-modal-stage"> <div class="mermaid-modal-canvas" data-mermaid-canvas></div> </div> </div> </div> <script type="module" src="/monad-client-book/_astro/BookLayout.astro_astro_type_script_index_0_lang.Cmw0jMFF.js"></script> </body> </html>

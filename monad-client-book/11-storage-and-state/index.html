@@ -1,0 +1,252 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="generator" content="Astro v6.1.9"><title>Chapter 11: Storage and State</title><meta property="og:title" content="Chapter 11: Storage and State"><meta property="og:image" content="https://mmv08.github.io/monad-client-book/og-image.png"><link rel="stylesheet" href="/monad-client-book/_astro/book.np3A6oR_.css"></head> <body data-has-toc="true"> <button class="menu-toggle" id="menuToggle" aria-label="Toggle menu">☰</button> <div class="page "> <aside class="sidebar" id="sidebar"> <p class="sidebar-title"><a href="/monad-client-book/">Monad Client Book</a></p> <nav> <ul> <li> <a href="/monad-client-book/00-introduction/" class> The Monad Client: A Bottom-Up Code Walkthrough </a> </li><li> <a href="/monad-client-book/01-foundation-types-and-crypto/" class> Chapter 1: Foundation — Types and Cryptography </a> </li><li> <a href="/monad-client-book/02-validators-epochs-and-leader-election/" class> Chapter 2: Validators, Epochs, and Leader Election </a> </li><li> <a href="/monad-client-book/03-consensus-data-structures/" class> Chapter 3: Consensus Data Structures </a> </li><li> <a href="/monad-client-book/04-the-consensus-protocol/" class> Chapter 4: The Consensus Protocol </a> </li><li> <a href="/monad-client-book/05-chain-config-forkpoints-and-sync/" class> Chapter 5: Chain Config, Forkpoints, Restart, and Sync </a> </li><li> <a href="/monad-client-book/06-execution-and-evm/" class> Chapter 6: Execution Boundary and Process Architecture </a> </li><li> <a href="/monad-client-book/07-execution-data-model-and-state-transition/" class> Chapter 7: Execution Data Model and State Transition </a> </li><li> <a href="/monad-client-book/08-execution-services-triedb-events-and-hosted-apis/" class> Chapter 8: Execution Services — Triedb, Event Rings, and Hosted APIs </a> </li><li> <a href="/monad-client-book/09-transaction-pool-and-fee-market/" class> Chapter 9: Transaction Pool and Fee Market </a> </li><li> <a href="/monad-client-book/10-networking-and-p2p/" class> Chapter 10: Networking and Peer-to-Peer Communication </a> </li><li> <a href="/monad-client-book/11-storage-and-state/" class="active"> Chapter 11: Storage and State </a> </li><li> <a href="/monad-client-book/12-node-assembly-and-rpc/" class> Chapter 12: Node Assembly and RPC </a> </li><li> <a href="/monad-client-book/13-failure-modes-and-defenses/" class> Chapter 13: Failure Modes and Defenses </a> </li><li> <a href="/monad-client-book/14-testing-and-simulation/" class> Chapter 14: Testing and Simulation </a> </li><li> <a href="/monad-client-book/15-how-monad-differs-from-ethereum/" class> Chapter 15: How Monad Differs From Ethereum </a> </li><li> <a href="/monad-client-book/16-glossary-timelines-and-reading-maps/" class> Appendix: Glossary, Timelines, and Reading Maps </a> </li> </ul> </nav> </aside> <main class="main"> <header class="page-header"> <h1>Chapter 11: Storage and State</h1> <div class="source-meta"> <span class="source-path">monad-client-book/11-storage-and-state.md</span> <a class="source-link" href="https://github.com/mmv08/category-labs-notes/blob/main/monad-client-book/11-storage-and-state.md" target="_blank" rel="noreferrer">
+View source →
+</a> </div> </header> <article class="book-content">  <p>Consensus chooses the chain. Storage decides what the node can still prove, replay, serve, and recover after the process restarts. Monad does not put all of that into one database — that is the first storage fact to internalize.</p>
+<p>Instead it splits durable data by job: triedb keeps retained recent execution state and recent execution-derived block data, the ledger keeps recent consensus blocks and head markers, the WAL keeps the local event stream for replay, and archive storage keeps older block-oriented history and indexes. If you keep those layers separate, later RPC and sync behavior becomes much easier to reason about.</p>
+<h2 id="why-this-chapter-matters">Why This Chapter Matters<a class="heading-anchor" aria-label="Link to this section" href="#why-this-chapter-matters">#</a></h2>
+<p>Readers coming from other blockchain clients often import the wrong mental model — the one where archive mode means every old query works forever. That is not the right model here. You need to distinguish retained recent state, durable recent consensus history, replay logs, and older archived blocks, receipts, traces, and indexes. Those are related, but they are not interchangeable.</p>
+<h2 id="111-use-the-companion-note-for-exact-path-detail">11.1 Use The Companion Note For Exact Path Detail<a class="heading-anchor" aria-label="Link to this section" href="#111-use-the-companion-note-for-exact-path-detail">#</a></h2>
+<p>This chapter is the mental-model version. The repo also contains a deeper companion note at <a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/docs/storage_paths.md"><code>docs/storage_paths.md</code></a>. Use this chapter first to understand the split; use the companion note when you want exact path names, key shapes, and storage backends.</p>
+<h2 id="112-four-durable-layers">11.2 Four Durable Layers<a class="heading-anchor" aria-label="Link to this section" href="#112-four-durable-layers">#</a></h2>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Layer</th><th>Main job</th><th>Main readers</th></tr></thead><tbody><tr><td>triedb</td><td>retained recent execution state and recent execution-derived block data</td><td>consensus and RPC</td></tr><tr><td>ledger</td><td>durable recent consensus blocks and head markers</td><td>node, block sync, execution daemon</td></tr><tr><td>WAL</td><td>replay-oriented node event log</td><td>replay tools, debugging</td></tr><tr><td>archive</td><td>older blocks, receipts, traces, and tx or log indexes</td><td>RPC historical readers</td></tr></tbody></table>
+<p>That is the real storage map.</p>
+<h2 id="113-triedb-is-the-retained-recent-execution-store">11.3 Triedb Is The Retained Recent Execution Store<a class="heading-anchor" aria-label="Link to this section" href="#113-triedb-is-the-retained-recent-execution-store">#</a></h2>
+<p>Triedb, or MonadDB in execution-oriented language, is the retained recent execution database. It stores accounts, storage slots, code, recent receipts, recent transactions, recent block headers, tx-hash and block-hash lookup data, and call-frame data. This is why both consensus and RPC depend on it.</p>
+<h3 id="triedb-is-versioned">Triedb Is Versioned<a class="heading-anchor" aria-label="Link to this section" href="#triedb-is-versioned">#</a></h3>
+<p>A triedb read is not only “give me the latest value.” It can also mean “give me the value at this retained block version.” For proposal views, there is one more wrinkle: two competing proposals at the same height must not collide. That is why proposal reads carry both a numeric block version and a proposal-specific block identity. The important mental model is that triedb is not one mutable latest-state map; it is a versioned recent-state store with separate finalized and proposal views.</p>
+<h3 id="triedb-has-several-logical-namespaces">Triedb Has Several Logical Namespaces<a class="heading-anchor" aria-label="Link to this section" href="#triedb-has-several-logical-namespaces">#</a></h3>
+<p>The logical key prefixes include namespaces such as:</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Prefix nibble</th><th>Meaning</th></tr></thead><tbody><tr><td><code>0</code></td><td>state</td></tr><tr><td><code>1</code></td><td>code</td></tr><tr><td><code>2</code></td><td>receipts</td></tr><tr><td><code>3</code></td><td>transactions</td></tr><tr><td><code>4</code></td><td>block header</td></tr><tr><td><code>5</code></td><td>withdrawals</td></tr><tr><td><code>6</code></td><td>ommers</td></tr><tr><td><code>7</code></td><td>tx-hash lookup</td></tr><tr><td><code>8</code></td><td>block-hash lookup</td></tr><tr><td><code>9</code></td><td>call frames</td></tr></tbody></table>
+<p>That table is useful because it reminds you that triedb is more than the account trie — it is also part of the recent block-oriented RPC surface.</p>
+<h2 id="114-consensus-and-rpc-consume-triedb-through-different-adapters">11.4 Consensus And RPC Consume Triedb Through Different Adapters<a class="heading-anchor" aria-label="Link to this section" href="#114-consensus-and-rpc-consume-triedb-through-different-adapters">#</a></h2>
+<p>The same underlying DB is exposed through different Rust-side adapters.</p>
+<h3 id="consensus-side">Consensus Side<a class="heading-anchor" aria-label="Link to this section" href="#consensus-side">#</a></h3>
+<p>Consensus reads go through a narrower path:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="text"><code><span class="line"><span>StateBackendThreadClient -> StateBackendCache -> TriedbReader -> triedb</span></span></code></pre>
+<p>That path keeps blocking work on a dedicated worker thread and gives consensus a smaller, more controlled read surface.</p>
+<h3 id="rpc-side">RPC Side<a class="heading-anchor" aria-label="Link to this section" href="#rpc-side">#</a></h3>
+<p>RPC uses <code>TriedbEnv</code>. <code>TriedbEnv</code> is broader: it tracks latest proposed, voted, and finalized metadata, exposes more query-style APIs, and maintains small caches used by the RPC process. So when you see “triedb read,” always ask whether it is a consensus-side narrow read or an RPC-side broader read. That distinction matters throughout the rest of the book.</p>
+<h2 id="115-the-ledger-stores-consensus-blocks-not-account-state">11.5 The Ledger Stores Consensus Blocks, Not Account State<a class="heading-anchor" aria-label="Link to this section" href="#115-the-ledger-stores-consensus-blocks-not-account-state">#</a></h2>
+<p>The ledger is the durable recent block store used by <code>monad-node</code>, block sync, and the execution daemon. At the filesystem level, <code>FileBlockPersist</code> creates <code>headers/</code> and <code>bodies/</code> directories, and inside <code>headers/</code> it also maintains <code>proposed_head</code>, <code>voted_head</code>, and <code>finalized_head</code>.</p>
+<p>Those head markers are symlinks. A <em>symlink</em>, or symbolic link, is a tiny filesystem entry that points at another file instead of containing its own payload. That matters here because a head update can be atomic even though the target block file already exists: the update path creates a temporary <code>&#x3C;head>.wip</code> symlink to the new target and then renames it into place. So the atomic unit is “install a new symlink by rename,” not “mutate an existing symlink in place.”</p>
+<h3 id="what-the-files-contain">What The Files Contain<a class="heading-anchor" aria-label="Link to this section" href="#what-the-files-contain">#</a></h3>
+<p>Each header file is named by <code>hex(block_id)</code>, and each body file is named by <code>hex(body_id)</code>. The file contents are raw RLP. <em>RLP</em> (Recursive Length Prefix) is Ethereum’s compact canonical encoding for arbitrary nested byte strings and lists, used everywhere blocks, headers, and transactions are serialized on the wire or on disk. The persistence layer here stores the same byte-level encoding that goes over the network: header files store <code>ConsensusBlockHeader</code>, and body files store <code>ConsensusBlockBody</code>. That is a very direct storage model — open file, read bytes, decode exact structure.</p>
+<h3 id="the-ledger-write-order-protects-coherency">The Ledger Write Order Protects Coherency<a class="heading-anchor" aria-label="Link to this section" href="#the-ledger-write-order-protects-coherency">#</a></h3>
+<p>The most important write rule is that the body is written first and the header is written second. That way a header never points to a body file that is missing. Then the head markers advance as consensus moves through commit states. That is why the ledger is not only a finalized block store: it also needs to remember broader recent consensus history because execution handoff, block sync, and restart recovery depend on it.</p>
+<h2 id="116-the-wal-is-the-nodes-replay-notebook">11.6 The WAL Is The Node’s Replay Notebook<a class="heading-anchor" aria-label="Link to this section" href="#116-the-wal-is-the-nodes-replay-notebook">#</a></h2>
+<p>The write-ahead log is the simplest durable layer in the repo. Its job is not to serve RPC. Its job is to record the node’s event stream for replay and debugging. Each record is a 4-byte little-endian length followed by the payload bytes. That is it.</p>
+<h3 id="why-wal-exists">Why WAL Exists<a class="heading-anchor" aria-label="Link to this section" href="#why-wal-exists">#</a></h3>
+<p><code>monad-node</code> writes to WAL before it applies the event to the main state machine. So the WAL records the actual input stream that drove <code>state.update(...)</code>, which makes it valuable for replay, crash investigation, and understanding event order. It is not a user-facing query database.</p>
+<h3 id="wal-durability-nuance">WAL Durability Nuance<a class="heading-anchor" aria-label="Link to this section" href="#wal-durability-nuance">#</a></h3>
+<p>The current node wiring does not <code>fsync</code> after every single event write. Normal runtime appends are durable file writes, but not the strongest possible per-event flush posture. Segment rotation still syncs the segment being closed. That is a practical tradeoff: lower steady-state write overhead and durable-enough replay logs for operational use, balanced against the fact that it is not a guarantee that every individual event was flushed at the instant it was appended.</p>
+<h2 id="117-archive-stores-older-block-oriented-history">11.7 Archive Stores Older Block-Oriented History<a class="heading-anchor" aria-label="Link to this section" href="#117-archive-stores-older-block-oriented-history">#</a></h2>
+<p>Archive storage is the long-term home for old blocks, old receipts, old traces, tx-hash index data, and optionally a logs index. This is the part of the system that gives RPC access to history older than triedb retention.</p>
+<h3 id="archive-is-about-historical-blocks-not-historical-state-reconstruction">Archive Is About Historical Blocks, Not Historical State Reconstruction<a class="heading-anchor" aria-label="Link to this section" href="#archive-is-about-historical-blocks-not-historical-state-reconstruction">#</a></h3>
+<p>This point is important enough to state directly. Archive storage helps answer old questions like “what was block <code>N</code>?”, “what receipt belonged to this old transaction hash?”, and “what traces were recorded for that block?” It does not mean that old balance, nonce, storage, or code reads can be reconstructed forever. In the current RPC code, account-style historical reads still depend on triedb retention. So archive is best imagined as historical block data plus indexes, not as a universal forever-state database.</p>
+<h3 id="archivereader-composes-several-pieces"><code>ArchiveReader</code> Composes Several Pieces<a class="heading-anchor" aria-label="Link to this section" href="#archivereader-composes-several-pieces">#</a></h3>
+<p><code>ArchiveReader</code> is the higher-level reader surface that can combine a block-data archive, a tx index, optional logs indexing, and optional fallback readers. That is why historical RPC reads often look like “try recent surfaces, try triedb, then try archive” rather than going straight to archive first.</p>
+<h2 id="118-in-memory-layers-matter-too">11.8 In-Memory Layers Matter Too<a class="heading-anchor" aria-label="Link to this section" href="#118-in-memory-layers-matter-too">#</a></h2>
+<p>Not every important read surface is durable. Several in-memory layers matter for freshness and performance: <code>StateBackendCache</code> on the consensus side, <code>TriedbEnv</code> metadata and RPC-side caches, and <code>ExecEventsBuffer</code> in <code>monad-rpc</code>. These are not substitutes for durable storage. They are speed and freshness layers on top of it.</p>
+<h3 id="execeventsbuffer-is-especially-important"><code>ExecEventsBuffer</code> Is Especially Important<a class="heading-anchor" aria-label="Link to this section" href="#execeventsbuffer-is-especially-important">#</a></h3>
+<p><code>ExecEventsBuffer</code> is populated from the execution event stream. It keeps a recent ring of blocks, txs, and receipts, plus three atomics for the latest proposed, voted, and finalized heights. That makes it one of the freshest surfaces in the whole system. It also means it has different failure modes than triedb or archive: it is live-feed-shaped, it is bounded, and it can miss data if the feed gaps or the consumer lags. That distinction becomes important again in the RPC chapter.</p>
+<h2 id="119-one-cross-subsystem-heads-table">11.9 One Cross-Subsystem Heads Table<a class="heading-anchor" aria-label="Link to this section" href="#119-one-cross-subsystem-heads-table">#</a></h2>
+<p>The words <em>proposed</em>, <em>voted</em>, and <em>finalized</em> show up in several subsystems. Keeping them aligned removes a lot of confusion.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Concept</th><th>Ledger</th><th>Triedb / RPC metadata</th><th><code>ExecEventsBuffer</code></th><th>RPC and WebSocket surface</th></tr></thead><tbody><tr><td>proposed</td><td><code>proposed_head</code> symlink</td><td>latest proposed block key</td><td><code>latest_proposed</code></td><td><code>latest</code> block tag resolves to proposed; standard <code>newHeads</code> and <code>logs</code> are currently filtered to proposed events</td></tr><tr><td>voted</td><td><code>voted_head</code> symlink</td><td>latest voted block key</td><td><code>latest_voted</code></td><td><code>safe</code> block tag resolves to voted</td></tr><tr><td>finalized</td><td><code>finalized_head</code> symlink</td><td>latest finalized block key</td><td><code>latest_finalized</code></td><td><code>finalized</code> block tag resolves to finalized</td></tr></tbody></table>
+<p>Monad-specific subscriptions are a little richer: <code>monadNewHeads</code> and <code>monadLogs</code> keep the commit state attached instead of hiding it behind a standard Ethereum-shaped result.</p>
+<h2 id="1110-which-queries-come-from-which-layer">11.10 Which Queries Come From Which Layer<a class="heading-anchor" aria-label="Link to this section" href="#1110-which-queries-come-from-which-layer">#</a></h2>
+<p>This table is the quickest way to avoid wrong assumptions.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Query shape</th><th>Main path</th><th>Important caveat</th></tr></thead><tbody><tr><td>recent block, tx, or receipt</td><td><code>ExecEventsBuffer</code> -> triedb -> archive</td><td>path depends on freshness and availability</td></tr><tr><td>historical balance, nonce, storage, or code</td><td>triedb only</td><td>works only while the needed version is retained</td></tr><tr><td>tx hash lookup</td><td><code>ExecEventsBuffer</code> -> triedb lookup table -> archive tx index</td><td>very old lookups depend on archive indexing</td></tr><tr><td><code>eth_getLogs</code></td><td>optional logs index first, otherwise recent surfaces -> triedb -> archive</td><td>logs index is only a prefilter, not the canonical store</td></tr><tr><td><code>eth_call</code></td><td>triedb-backed block context + hosted executor</td><td>this is execution over retained state, not another storage backend</td></tr><tr><td>replay-style debug trace</td><td>triedb-backed context + hosted executor</td><td>different from reading stored call frames</td></tr></tbody></table>
+<p>If you remember only one storage rule for RPC, remember this one: old block history and old account state are not the same thing.</p>
+<h2 id="1111-a-few-paths-worth-memorizing">11.11 A Few Paths Worth Memorizing<a class="heading-anchor" aria-label="Link to this section" href="#1111-a-few-paths-worth-memorizing">#</a></h2>
+<p>You do not need the full on-disk map in your head, but these are worth remembering:</p>
+<ul>
+<li>ledger headers: <code>ledger_path/headers/&#x3C;block_id></code></li>
+<li>ledger bodies: <code>ledger_path/bodies/&#x3C;body_id></code></li>
+<li>ledger heads: <code>ledger_path/headers/proposed_head</code>, <code>voted_head</code>, <code>finalized_head</code></li>
+<li>WAL segments: one basename with numbered suffixes such as <code>&#x3C;base>.0</code>, <code>&#x3C;base>.1</code></li>
+<li>archive keys: block-oriented namespaces like <code>block/&#x3C;number></code> and <code>receipts/&#x3C;number></code></li>
+</ul>
+<p>For exact path layouts and backend variants, go back to <a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/docs/storage_paths.md"><code>docs/storage_paths.md</code></a>.</p>
+<h2 id="1112-the-right-storage-mental-model">11.12 The Right Storage Mental Model<a class="heading-anchor" aria-label="Link to this section" href="#1112-the-right-storage-mental-model">#</a></h2>
+<p>If you want one compact bottom-up model, use this: consensus blocks land in the ledger; execution turns those blocks into triedb updates and event-stream outputs; <code>monad-node</code> logs its own event stream to WAL; and <code>monad-rpc</code> serves the freshest recent data from buffers, the retained recent state from triedb, and older block history from archive. That model is good enough to predict most later behavior.</p>
+<h2 id="1113-architecture-current-code-current-caveat">11.13 Architecture, Current Code, Current Caveat<a class="heading-anchor" aria-label="Link to this section" href="#1113-architecture-current-code-current-caveat">#</a></h2>
+<blockquote>
+<p><strong>Architecture</strong>
+Monad splits durable state by job: consensus history in the ledger, retained recent execution state in triedb, replay input history in WAL, and older block-oriented history in archive.</p>
+</blockquote>
+<blockquote>
+<p><strong>Current code</strong>
+<code>FileBlockPersist</code> writes body first, then header, and advances head markers through atomic symlink replacement. RPC then composes buffers, triedb, and archive on top of those durable layers.</p>
+</blockquote>
+<blockquote>
+<p><strong>Current caveat</strong>
+Archive extends historical block-oriented queries, not historical world-state reads. Fresh recent buffers are useful, but they are still live-feed-shaped and gap-sensitive.</p>
+</blockquote>
+<h2 id="open-these-files-first">Open These Files First<a class="heading-anchor" aria-label="Link to this section" href="#open-these-files-first">#</a></h2>
+<ul>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/docs/storage_paths.md"><code>docs/storage_paths.md</code></a>: deeper storage companion note</li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-block-persist/src/lib.rs"><code>monad-block-persist/src/lib.rs</code></a>: file layout, body or header write order, atomic head updates</li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-ledger/src/lib.rs"><code>monad-ledger/src/lib.rs</code></a>: ledger wrapper and blocksync-serving logic</li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-wal/src/wal.rs"><code>monad-wal/src/wal.rs</code></a>: WAL record format and sync behavior</li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-triedb-utils/src/triedb_env.rs"><code>monad-triedb-utils/src/triedb_env.rs</code></a>: broader RPC-side triedb adapter</li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-state-backend/src/thread.rs"><code>monad-state-backend/src/thread.rs</code></a>: consensus-side triedb worker boundary</li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-archive/src/model/block_data_archive.rs"><code>monad-archive/src/model/block_data_archive.rs</code></a>: archive block store</li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-archive/src/archive_reader.rs"><code>monad-archive/src/archive_reader.rs</code></a>: composed archive reader</li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-archive/src/model/index_repr.rs"><code>monad-archive/src/model/index_repr.rs</code></a>: tx-index representation</li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-archive/src/model/logs_index.rs"><code>monad-archive/src/model/logs_index.rs</code></a>: logs-index shape</li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-rpc/src/data/buffer.rs"><code>monad-rpc/src/data/buffer.rs</code></a>: <code>ExecEventsBuffer</code></li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-rpc/src/data/mod.rs"><code>monad-rpc/src/data/mod.rs</code></a>: one consumer that composes recent, retained, and archived reads</li>
+</ul>  </article> <nav class="chapter-nav" aria-label="Chapter navigation"><div class="chapter-nav-item"><a href="/monad-client-book/10-networking-and-p2p/"><span class="chapter-nav-label">Previous</span>
+← Chapter 10: Networking and Peer-to-Peer Communication</a></div><div class="chapter-nav-item chapter-nav-item-next"><a href="/monad-client-book/12-node-assembly-and-rpc/"><span class="chapter-nav-label">Next</span>Chapter 12: Node Assembly and RPC →
+</a></div></nav> </main> <aside class="chapter-tools"> <section class="tools-panel" aria-label="Table of contents"> <h2>On this page</h2> <ul class="toc-list"> <li> <a class="toc-link depth-2" href="#why-this-chapter-matters"> Why This Chapter Matters </a> </li><li> <a class="toc-link depth-2" href="#111-use-the-companion-note-for-exact-path-detail"> 11.1 Use The Companion Note For Exact Path Detail </a> </li><li> <a class="toc-link depth-2" href="#112-four-durable-layers"> 11.2 Four Durable Layers </a> </li><li> <a class="toc-link depth-2" href="#113-triedb-is-the-retained-recent-execution-store"> 11.3 Triedb Is The Retained Recent Execution Store </a> </li><li> <a class="toc-link depth-3" href="#triedb-is-versioned"> Triedb Is Versioned </a> </li><li> <a class="toc-link depth-3" href="#triedb-has-several-logical-namespaces"> Triedb Has Several Logical Namespaces </a> </li><li> <a class="toc-link depth-2" href="#114-consensus-and-rpc-consume-triedb-through-different-adapters"> 11.4 Consensus And RPC Consume Triedb Through Different Adapters </a> </li><li> <a class="toc-link depth-3" href="#consensus-side"> Consensus Side </a> </li><li> <a class="toc-link depth-3" href="#rpc-side"> RPC Side </a> </li><li> <a class="toc-link depth-2" href="#115-the-ledger-stores-consensus-blocks-not-account-state"> 11.5 The Ledger Stores Consensus Blocks, Not Account State </a> </li><li> <a class="toc-link depth-3" href="#what-the-files-contain"> What The Files Contain </a> </li><li> <a class="toc-link depth-3" href="#the-ledger-write-order-protects-coherency"> The Ledger Write Order Protects Coherency </a> </li><li> <a class="toc-link depth-2" href="#116-the-wal-is-the-nodes-replay-notebook"> 11.6 The WAL Is The Node’s Replay Notebook </a> </li><li> <a class="toc-link depth-3" href="#why-wal-exists"> Why WAL Exists </a> </li><li> <a class="toc-link depth-3" href="#wal-durability-nuance"> WAL Durability Nuance </a> </li><li> <a class="toc-link depth-2" href="#117-archive-stores-older-block-oriented-history"> 11.7 Archive Stores Older Block-Oriented History </a> </li><li> <a class="toc-link depth-3" href="#archive-is-about-historical-blocks-not-historical-state-reconstruction"> Archive Is About Historical Blocks, Not Historical State Reconstruction </a> </li><li> <a class="toc-link depth-3" href="#archivereader-composes-several-pieces"> ArchiveReader Composes Several Pieces </a> </li><li> <a class="toc-link depth-2" href="#118-in-memory-layers-matter-too"> 11.8 In-Memory Layers Matter Too </a> </li><li> <a class="toc-link depth-3" href="#execeventsbuffer-is-especially-important"> ExecEventsBuffer Is Especially Important </a> </li><li> <a class="toc-link depth-2" href="#119-one-cross-subsystem-heads-table"> 11.9 One Cross-Subsystem Heads Table </a> </li><li> <a class="toc-link depth-2" href="#1110-which-queries-come-from-which-layer"> 11.10 Which Queries Come From Which Layer </a> </li><li> <a class="toc-link depth-2" href="#1111-a-few-paths-worth-memorizing"> 11.11 A Few Paths Worth Memorizing </a> </li><li> <a class="toc-link depth-2" href="#1112-the-right-storage-mental-model"> 11.12 The Right Storage Mental Model </a> </li><li> <a class="toc-link depth-2" href="#1113-architecture-current-code-current-caveat"> 11.13 Architecture, Current Code, Current Caveat </a> </li><li> <a class="toc-link depth-2" href="#open-these-files-first"> Open These Files First </a> </li> </ul> </section> </aside> </div>  <script type="module" src="/monad-client-book/_astro/BookLayout.astro_astro_type_script_index_0_lang.Cmw0jMFF.js"></script> </body> </html>

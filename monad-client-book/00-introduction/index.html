@@ -1,0 +1,397 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="generator" content="Astro v6.1.9"><title>The Monad Client: A Bottom-Up Code Walkthrough</title><meta property="og:title" content="The Monad Client: A Bottom-Up Code Walkthrough"><meta property="og:image" content="https://mmv08.github.io/monad-client-book/og-image.png"><link rel="stylesheet" href="/monad-client-book/_astro/book.np3A6oR_.css"></head> <body data-has-toc="true" data-has-mermaid="true"> <button class="menu-toggle" id="menuToggle" aria-label="Toggle menu">☰</button> <div class="page "> <aside class="sidebar" id="sidebar"> <p class="sidebar-title"><a href="/monad-client-book/">Monad Client Book</a></p> <nav> <ul> <li> <a href="/monad-client-book/00-introduction/" class="active"> The Monad Client: A Bottom-Up Code Walkthrough </a> </li><li> <a href="/monad-client-book/01-foundation-types-and-crypto/" class> Chapter 1: Foundation — Types and Cryptography </a> </li><li> <a href="/monad-client-book/02-validators-epochs-and-leader-election/" class> Chapter 2: Validators, Epochs, and Leader Election </a> </li><li> <a href="/monad-client-book/03-consensus-data-structures/" class> Chapter 3: Consensus Data Structures </a> </li><li> <a href="/monad-client-book/04-the-consensus-protocol/" class> Chapter 4: The Consensus Protocol </a> </li><li> <a href="/monad-client-book/05-chain-config-forkpoints-and-sync/" class> Chapter 5: Chain Config, Forkpoints, Restart, and Sync </a> </li><li> <a href="/monad-client-book/06-execution-and-evm/" class> Chapter 6: Execution Boundary and Process Architecture </a> </li><li> <a href="/monad-client-book/07-execution-data-model-and-state-transition/" class> Chapter 7: Execution Data Model and State Transition </a> </li><li> <a href="/monad-client-book/08-execution-services-triedb-events-and-hosted-apis/" class> Chapter 8: Execution Services — Triedb, Event Rings, and Hosted APIs </a> </li><li> <a href="/monad-client-book/09-transaction-pool-and-fee-market/" class> Chapter 9: Transaction Pool and Fee Market </a> </li><li> <a href="/monad-client-book/10-networking-and-p2p/" class> Chapter 10: Networking and Peer-to-Peer Communication </a> </li><li> <a href="/monad-client-book/11-storage-and-state/" class> Chapter 11: Storage and State </a> </li><li> <a href="/monad-client-book/12-node-assembly-and-rpc/" class> Chapter 12: Node Assembly and RPC </a> </li><li> <a href="/monad-client-book/13-failure-modes-and-defenses/" class> Chapter 13: Failure Modes and Defenses </a> </li><li> <a href="/monad-client-book/14-testing-and-simulation/" class> Chapter 14: Testing and Simulation </a> </li><li> <a href="/monad-client-book/15-how-monad-differs-from-ethereum/" class> Chapter 15: How Monad Differs From Ethereum </a> </li><li> <a href="/monad-client-book/16-glossary-timelines-and-reading-maps/" class> Appendix: Glossary, Timelines, and Reading Maps </a> </li> </ul> </nav> </aside> <main class="main"> <header class="page-header"> <h1>The Monad Client: A Bottom-Up Code Walkthrough</h1> <div class="source-meta"> <span class="source-path">monad-client-book/00-introduction.md</span> <a class="source-link" href="https://github.com/mmv08/category-labs-notes/blob/main/monad-client-book/00-introduction.md" target="_blank" rel="noreferrer">
+View source →
+</a> </div> </header> <article class="book-content">  <h2 id="what-this-book-is">What This Book Is<a class="heading-anchor" aria-label="Link to this section" href="#what-this-book-is">#</a></h2>
+<p>This book is a code-first walkthrough of how a Monad node works. It is written for engineers who already know Solidity, Ethereum transactions, and the basics of blocks, receipts, logs, and JSON-RPC, and who now want to understand how Monad orders blocks, how execution is wired into that ordering, how the repos are split, how the running processes cooperate, and where to start reading the code without getting lost.</p>
+<p>The goal is not to memorize crate names. The goal is to build a mental model that stays correct when you open the code and follow a real path from a wallet request, into the txpool (the in-memory pool of pending transactions), into a proposal, through ledger persistence, into delayed execution, into triedb (the execution-state database, introduced below), and back out to RPC responses and subscriptions.</p>
+<blockquote>
+<p><strong>Current code</strong>
+This walkthrough is written against the local <code>monad-bft</code> and <code>monad</code> checkouts in this workspace. When the book and the code disagree, trust the code.</p>
+</blockquote>
+<blockquote>
+<p><strong>Pinned source links</strong>
+Source links in this edition are pinned to <code>monad-bft@544e0bc286ea</code> and <code>monad@613698c24cec</code>, the exact checkouts reviewed for this book. The local repos are still authoritative.</p>
+</blockquote>
+<h2 id="what-this-book-is-not">What This Book Is Not<a class="heading-anchor" aria-label="Link to this section" href="#what-this-book-is-not">#</a></h2>
+<p>This book is not a formal consensus spec, a public RPC reference, a substitute for reading tests, or a promise that every current implementation detail is permanent. Some parts of Monad are architectural, some parts are current wiring, and some parts are plain TODO territory. This book tries to tell you which is which.</p>
+<h2 id="the-first-picture-to-lock-in">The First Picture To Lock In<a class="heading-anchor" aria-label="Link to this section" href="#the-first-picture-to-lock-in">#</a></h2>
+<p>Before reading any chapter, keep four facts in your head: Monad is one client system split across two repos, a real node is usually several cooperating processes, execution is intentionally delayed, and “latest” depends on which subsystem you are asking. If those four facts stay sharp, the codebase becomes much easier to trust.</p>
+<h2 id="one-client-two-repos-one-shared-execution-library">One Client, Two Repos, One Shared Execution Library<a class="heading-anchor" aria-label="Link to this section" href="#one-client-two-repos-one-shared-execution-library">#</a></h2>
+<p>Monad is split across two repositories:</p>
+<ul>
+<li><code>monad-bft</code>: the Rust-side consensus, networking, sync, txpool, node, and RPC repo</li>
+<li><code>monad</code>: the execution repo, centered on the execution engine; the retained recent execution-state database called <em>triedb</em> (also known as <em>MonadDB</em>, since the two names are used interchangeably in the code and docs); hosted execution APIs, which are execution functions loaded into Rust-side processes so they can be called without an extra process; and the execution daemon</li>
+</ul>
+<p>That split is architectural, not cosmetic.</p>
+<p>At the same time, the execution repo is not “just the daemon repo.”</p>
+<p>Most execution code is built around a shared execution library. The CMake target that builds it is called <code>monad_execution</code>, which produces the <code>libmonad_execution</code> library file that everything else links against. The execution repo’s own overview refers to it by that file name, and this book does the same. That execution-owned core is consumed in more than one way: by the stand-alone execution daemon, by hosted execution APIs loaded into Rust-side processes, and by tools and tests in the execution repo itself.</p>
+<p>So the stable picture is that the repo boundary and ownership boundary stay constant, but the process boundary depends on which execution surface is being used. This is one reason Monad feels slippery at first: repo boundaries and process boundaries are related, but they are not identical.</p>
+<h2 id="one-node-usually-three-processes">One Node, Usually Three Processes<a class="heading-anchor" aria-label="Link to this section" href="#one-node-usually-three-processes">#</a></h2>
+<p>In normal day-to-day operation, a validator-shaped Monad node is usually three cooperating processes:</p>
+<ul>
+<li><code>monad-node</code>: consensus, validator networking, sync, txpool ownership, and ledger persistence</li>
+<li><code>monad-rpc</code>: JSON-RPC and WebSocket edge</li>
+<li><code>monad</code>: the execution daemon that reads ordered blocks from the ledger and writes execution outputs</li>
+</ul>
+<p>There is also one more execution mode that does not get its own process: hosted execution APIs loaded directly into Rust-side processes. That last one matters a lot, because execution is not only “the daemon over there.” The same execution repo is also consumed through hosted APIs for triedb reads, <code>eth_call</code>, execution-event consumption, and staking-backed validator-set reads.</p>
+<p>So the right mental model is one consensus repo, one execution repo, one shared execution core, and several execution consumption paths — not one Rust program that somehow also “does execution.”</p>
+<h2 id="why-monad-bft-still-contains-monad-execution">Why <code>monad-bft</code> Still Contains <code>monad-execution/</code><a class="heading-anchor" aria-label="Link to this section" href="#why-monad-bft-still-contains-monad-execution">#</a></h2>
+<p>This is the first repo-layout detail that confuses almost everyone. <code>monad-bft</code> contains a <code>monad-execution/</code> directory, but that does not mean the two-repo explanation is wrong. That directory is a git submodule pointing back to the execution repo, and Rust path dependencies use it to reach execution-owned crates such as <code>monad-triedb</code>, <code>monad-ethcall</code>, <code>monad-event-ring</code>, and <code>monad-exec-events</code>.</p>
+<p>So the clean picture is still that <code>monad</code> owns execution, and <code>monad-bft</code> just vendors an execution submodule so Rust code can link against execution-owned libraries. That is a packaging convenience, not an architectural collapse.</p>
+<h2 id="the-runtime-boundaries-that-actually-matter">The Runtime Boundaries That Actually Matter<a class="heading-anchor" aria-label="Link to this section" href="#the-runtime-boundaries-that-actually-matter">#</a></h2>
+<p>When you read the code, do not only ask where a feature lives. Also ask which boundary that feature is crossing right now. These are the main boundaries that show up repeatedly:</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Boundary</th><th>Example</th><th>What crosses it</th></tr></thead><tbody><tr><td>repo boundary</td><td><code>monad-bft</code> &#x3C;-> <code>monad</code></td><td>ownership, source layout, build integration</td></tr><tr><td>process boundary</td><td><code>monad-node</code> -> ledger -> <code>monad</code></td><td>ordered blocks</td></tr><tr><td>local IPC boundary (IPC = inter-process communication, here a Unix domain socket between two processes on the same machine)</td><td><code>monad-rpc</code> -> txpool Unix socket</td><td>transaction submission</td></tr><tr><td>FFI / hosted API boundary (FFI = foreign function interface, where Rust code calls directly into a C or C++ library in the same process)</td><td>Rust -> execution library</td><td>triedb reads, <code>eth_call</code>, validator-set reads</td></tr><tr><td>live-output boundary</td><td>execution daemon -> event ring</td><td>freshest execution events</td></tr></tbody></table>
+<p>That question, “which boundary am I crossing?”, will save you a lot of time later.</p>
+<h2 id="one-transaction-end-to-end">One Transaction, End To End<a class="heading-anchor" aria-label="Link to this section" href="#one-transaction-end-to-end">#</a></h2>
+<p>Before diving into types, hold one concrete story in your head.</p>
+<h3 id="the-short-story">The Short Story<a class="heading-anchor" aria-label="Link to this section" href="#the-short-story">#</a></h3>
+<ol>
+<li>A wallet sends a transaction to <code>monad-rpc</code>.</li>
+<li><code>monad-rpc</code> forwards it over a Unix socket to the txpool owned by <code>monad-node</code>.</li>
+<li>The txpool validates it against current retained state plus delayed-window policy.</li>
+<li>When the node is leader, proposal construction combines deterministic system transactions with eligible user transactions from the txpool.</li>
+<li><code>monad-node</code> persists the ordered consensus block to the ledger.</li>
+<li>Consensus advances through proposals, votes, certificates, timeouts, and commits.</li>
+<li>The execution daemon later reads the ordered block from the ledger.</li>
+<li>Execution validates the Monad-specific block shape, executes the block, writes triedb updates, and emits fresh execution events.</li>
+<li><code>monad-rpc</code> answers different methods from different surfaces: triedb for retained recent state, recent in-memory event buffers for the freshest recent outputs, and archive readers for older block-oriented history.</li>
+</ol>
+<h3 id="the-same-story-with-boundaries-called-out">The Same Story With Boundaries Called Out<a class="heading-anchor" aria-label="Link to this section" href="#the-same-story-with-boundaries-called-out">#</a></h3>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="mermaid"><code><span class="line"><span style="color:#E1E4E8">flowchart LR</span></span>
+<span class="line"><span style="color:#E1E4E8">    User["wallet / app"] --> RPC["monad-rpc"]</span></span>
+<span class="line"><span style="color:#E1E4E8">    RPC -->|Unix socket| TxPool["txpool inside monad-node"]</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#E1E4E8">    subgraph Consensus["monad-bft"]</span></span>
+<span class="line"><span style="color:#E1E4E8">        Node["monad-node"]</span></span>
+<span class="line"><span style="color:#E1E4E8">        Ledger["ledger"]</span></span>
+<span class="line"><span style="color:#E1E4E8">        StateBackend["state backend / triedb readers"]</span></span>
+<span class="line"><span style="color:#E1E4E8">    end</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#E1E4E8">    subgraph Execution["monad repo"]</span></span>
+<span class="line"><span style="color:#E1E4E8">        Exec["monad execution daemon"]</span></span>
+<span class="line"><span style="color:#E1E4E8">        Triedb["triedb / MonadDB"]</span></span>
+<span class="line"><span style="color:#E1E4E8">        Ring["execution event ring"]</span></span>
+<span class="line"><span style="color:#E1E4E8">    end</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#E1E4E8">    TxPool --> Node</span></span>
+<span class="line"><span style="color:#E1E4E8">    Node --> Ledger</span></span>
+<span class="line"><span style="color:#E1E4E8">    Ledger --> Exec</span></span>
+<span class="line"><span style="color:#E1E4E8">    Exec --> Triedb</span></span>
+<span class="line"><span style="color:#E1E4E8">    Exec --> Ring</span></span>
+<span class="line"><span style="color:#E1E4E8">    StateBackend --> Triedb</span></span>
+<span class="line"><span style="color:#E1E4E8">    RPC --> Triedb</span></span>
+<span class="line"><span style="color:#E1E4E8">    RPC --> Ring</span></span></code></pre>
+<p>That diagram is the whole client in miniature.</p>
+<h2 id="delayed-execution-in-one-first-pass-timeline">Delayed Execution In One First-Pass Timeline<a class="heading-anchor" aria-label="Link to this section" href="#delayed-execution-in-one-first-pass-timeline">#</a></h2>
+<p>Delayed execution is the most important Monad-specific idea in this book. You do not need every detail yet, but you do need one stable first picture. In the current <code>monad-node</code> wiring, <code>EXECUTION_DELAY = 3</code>, which means the useful first-pass mental model is:</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>When block is ordered</th><th>What is true right away</th><th>What happens later</th></tr></thead><tbody><tr><td>block <code>N</code> is ordered</td><td>consensus can keep moving</td><td>execution of <code>N</code> finishes later</td></tr><tr><td>block <code>N+1</code> is ordered</td><td>consensus still has not fully “caught execution up” to the tip</td><td>more delayed pipeline work accumulates</td></tr><tr><td>block <code>N+2</code> is ordered</td><td>validators are still reasoning over a lagged execution view</td><td>reserve-balance rules matter because ordering sees stale state</td></tr><tr><td>block <code>N+3</code> is ordered</td><td>a later block can now carry delayed execution results for older work such as <code>N</code></td><td>execution validates those delayed results against canonical earlier block history</td></tr></tbody></table>
+<p>One consequence of this is that a single Monad block can talk in two time directions at once: forward, “here is the new work this block orders,” and backward, “here are delayed execution results for earlier ordered work.”</p>
+<p>This single fact explains a surprising amount of the codebase — why coherency is not the same thing as structural validity, why block headers carry <code>execution_inputs</code> and <code>delayed_execution_results</code>, why reserve balance exists, why state sync targets a delayed execution anchor, and why “latest ordered block” and “latest executed state” are not the same question.</p>
+<p>Later chapters make this exact timeline precise. The appendix keeps one canonical version handy: <a href="/monad-client-book/16-glossary-timelines-and-reading-maps">Appendix: Glossary, Timelines, and Reading Maps</a>.</p>
+<h2 id="the-three-main-clocks">The Three Main Clocks<a class="heading-anchor" aria-label="Link to this section" href="#the-three-main-clocks">#</a></h2>
+<p>Monad does not run on one time axis. Three clocks show up everywhere:</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Clock</th><th>What it counts</th><th>Why it exists</th></tr></thead><tbody><tr><td><code>Round</code></td><td>one consensus attempt</td><td>pacemaker logic, proposal timing, timeouts, certificates</td></tr><tr><td><code>SeqNum</code></td><td>ordered consensus block height</td><td>ancestry, delayed execution inputs, restart anchors</td></tr><tr><td><code>Epoch</code></td><td>validator-set era</td><td>quorum accounting, validator selection, leader election</td></tr></tbody></table>
+<p>The most common early mistake is to blur <code>Round</code> and <code>SeqNum</code>. Keep three questions separate: <code>Round</code> asks which consensus attempt we are on; <code>SeqNum</code> asks how deep the ordered chain is; <code>Epoch</code> asks which validator set is allowed to act for this round. Rounds can advance without a new committed block, while sequence numbers advance only when a new ordered block exists.</p>
+<h2 id="two-more-round-words-you-must-not-blur">Two More Round Words You Must Not Blur<a class="heading-anchor" aria-label="Link to this section" href="#two-more-round-words-you-must-not-blur">#</a></h2>
+<p>Later chapters will introduce <code>block_round</code> and <code>proposal_round</code>. For now, keep the short version: <code>block_round</code> is when the block was originally authored, and it lives as a field on the block header itself; <code>proposal_round</code> is when the current proposal message is being sent, and it lives on the proposal message, not the header. So the two live in different places in the code — one is engraved into the block header at authoring time, the other travels with whichever proposal message is currently carrying that header.</p>
+<p>On the happy path they match. On recovery paths they can diverge. That split is one of the reasons the recovery code feels unfamiliar at first.</p>
+<h2 id="freshness-words-proposed-voted-finalized">Freshness Words: <code>proposed</code>, <code>voted</code>, <code>finalized</code><a class="heading-anchor" aria-label="Link to this section" href="#freshness-words-proposed-voted-finalized">#</a></h2>
+<p>Several subsystems use the same three freshness words — <code>proposed</code>, <code>voted</code>, and <code>finalized</code> — and they do not mean “three completely different worlds.” They mean progressively stronger views of the chain.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Word</th><th>Short meaning</th></tr></thead><tbody><tr><td><code>proposed</code></td><td>newest observed head</td></tr><tr><td><code>voted</code></td><td>stronger intermediate head</td></tr><tr><td><code>finalized</code></td><td>durable committed anchor</td></tr></tbody></table>
+<p>These words show up in ledger head markers, triedb metadata, execution events, recent buffers, RPC method resolution, and WebSocket subscriptions. So stop asking only “what is latest?” and start asking instead: latest according to which subsystem, latest retained by which store, and latest safe for which kind of read?</p>
+<p>Later chapters map Ethereum-style block tags such as <code>latest</code>, <code>safe</code>, and <code>finalized</code> onto these freshness views and the read surfaces that can actually answer them. Do not assume one hidden universal database is sitting underneath all three. The appendix has one cross-subsystem table for this too: <a href="/monad-client-book/16-glossary-timelines-and-reading-maps#freshness-and-read-surfaces-cheat-sheet">Appendix: Glossary, Timelines, and Reading Maps</a>.</p>
+<h2 id="the-main-read-surfaces">The Main Read Surfaces<a class="heading-anchor" aria-label="Link to this section" href="#the-main-read-surfaces">#</a></h2>
+<p>Monad does not put all durable and recent information into one database. That split is deliberate.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Surface</th><th>Best mental model</th><th>Main consumers</th></tr></thead><tbody><tr><td>ledger</td><td>durable consensus block history</td><td>restart, execution daemon, block sync</td></tr><tr><td>triedb</td><td>retained recent execution state and recent block-oriented execution data</td><td>consensus reads, RPC reads</td></tr><tr><td>event ring</td><td>freshest execution-event stream</td><td>WebSockets, recent buffers</td></tr><tr><td>WAL</td><td>replay notebook of node inputs</td><td>replay tools, debugging</td></tr><tr><td>archive</td><td>older block-oriented history</td><td>historical RPC</td></tr></tbody></table>
+<p>The practical consequence is simple: different RPC methods are backed by different surfaces, and the freshest observable event and the most authoritative retained state may come from different places.</p>
+<h2 id="a-working-glossary">A Working Glossary<a class="heading-anchor" aria-label="Link to this section" href="#a-working-glossary">#</a></h2>
+<p>These definitions are worth learning early because later chapters reuse them without apology.</p>
+<p><strong><code>valid</code></strong><br>
+Structurally and cryptographically acceptable.</p>
+<p><strong><code>coherent</code></strong><br>
+Valid and also consistent with the chain and delayed-execution state context the node currently has.</p>
+<p><strong>missing ancestor</strong><br>
+The block may be fine, but local ancestry is incomplete.</p>
+<p><strong>lagging state</strong><br>
+The node’s execution-side state is too far behind to participate safely.</p>
+<p><strong>forkpoint</strong><br>
+The restart anchor: committed root plus high certificate plus nearby validator context.</p>
+<p><strong>block sync</strong><br>
+Fetch missing consensus blocks and ancestry.</p>
+<p><strong>state sync</strong><br>
+Fetch recent execution state so the node does not replay everything from genesis.</p>
+<p><strong>triedb / MonadDB</strong><br>
+The durable recent execution database.</p>
+<p><strong>event ring</strong><br>
+The freshest live execution-event stream.</p>
+<p><strong>archive</strong><br>
+Older block-oriented history. Not a general historical world-state engine.</p>
+<p>For the larger reference version, use the appendix:
+<a href="/monad-client-book/16-glossary-timelines-and-reading-maps#global-glossary">Appendix: Glossary, Timelines, and Reading Maps</a>.</p>
+<h2 id="repo-map">Repo Map<a class="heading-anchor" aria-label="Link to this section" href="#repo-map">#</a></h2>
+<p>If you are about to open the repos for the first time, start with this simplified map.</p>
+<h3 id="monad-bft"><code>monad-bft</code><a class="heading-anchor" aria-label="Link to this section" href="#monad-bft">#</a></h3>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Area</th><th>Why it matters</th></tr></thead><tbody><tr><td><code>monad-types</code></td><td>fundamental wrappers such as <code>Round</code>, <code>SeqNum</code>, <code>Epoch</code>, <code>BlockId</code></td></tr><tr><td><code>monad-crypto</code></td><td>hashing, signing domains, signature traits</td></tr><tr><td><code>monad-validator</code></td><td>validator sets, validator mappings, leader election</td></tr><tr><td><code>monad-consensus-types</code></td><td>blocks, votes, QCs, timeouts, checkpoints, recovery objects</td></tr><tr><td><code>monad-consensus</code></td><td>pacemaker, vote state, safety, certificate validation</td></tr><tr><td><code>monad-consensus-state</code></td><td>proposal handling, commit logic, recovery transitions</td></tr><tr><td><code>monad-eth-block-policy</code></td><td>coherency and reserve-balance-aware policy</td></tr><tr><td><code>monad-eth-txpool</code></td><td>txpool logic and proposal sequencing</td></tr><tr><td><code>monad-node</code></td><td>node assembly and runtime loop</td></tr><tr><td><code>monad-rpc</code></td><td>RPC binary assembly and recent-data composition</td></tr></tbody></table>
+<h3 id="monad"><code>monad</code><a class="heading-anchor" aria-label="Link to this section" href="#monad">#</a></h3>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Area</th><th>Why it matters</th></tr></thead><tbody><tr><td><code>docs/overview.md</code></td><td>execution-side architecture overview</td></tr><tr><td><code>cmd/monad</code></td><td>execution daemon assembly and run loop</td></tr><tr><td><code>category/execution</code></td><td>block execution logic and Monad-specific rules</td></tr><tr><td><code>category/mpt</code></td><td>triedb or MonadDB</td></tr><tr><td><code>category/rpc</code></td><td>hosted execution APIs such as <code>eth_call</code></td></tr><tr><td><code>category/statesync</code></td><td>execution-side state sync</td></tr><tr><td><code>test</code></td><td>execution-side C++ unit tests, Ethereum fixtures, VM tests</td></tr></tbody></table>
+<h2 id="how-to-use-this-book">How To Use This Book<a class="heading-anchor" aria-label="Link to this section" href="#how-to-use-this-book">#</a></h2>
+<p>Read the chapters in order. Each one builds on the vocabulary and mental model set up by the previous one, and that progression is part of the pedagogy. If you want to jump ahead, the table of contents in the sidebar is there for you, but the default assumption is a start-to-finish read.</p>
+<p>Each chapter tries to answer four questions:</p>
+<ol>
+<li>What problem is this subsystem solving?</li>
+<li>What minimum nouns do you need before opening the code?</li>
+<li>What real path through the code should you follow first?</li>
+<li>Which details are architecture, and which are only current wiring?</li>
+</ol>
+<p>The fastest way to get value from a single chapter is to read it once for the mental model, open the listed files and entrypoints, follow one real path through the code, and then come back and read the chapter again more slowly.</p>
+<h2 id="what-to-keep-in-your-head-before-chapter-1">What To Keep In Your Head Before Chapter 1<a class="heading-anchor" aria-label="Link to this section" href="#what-to-keep-in-your-head-before-chapter-1">#</a></h2>
+<p>If you keep only eight facts from the introduction, keep these:</p>
+<ul>
+<li>Monad is one client system split across two repos.</li>
+<li>A real node is usually several cooperating processes, plus hosted execution APIs.</li>
+<li>The execution repo owns a shared execution core reused in daemon and hosted modes.</li>
+<li><code>Round</code>, <code>SeqNum</code>, and <code>Epoch</code> are different clocks for different jobs.</li>
+<li><code>block_round</code> and <code>proposal_round</code> are different because recovery is a real path.</li>
+<li>Consensus ordering and execution are intentionally separated by a delay.</li>
+<li>Different read surfaces answer different kinds of “latest.”</li>
+<li>“Latest ordered block” and “latest executed state” are not the same question.</li>
+</ul>
+<p>The next chapter introduces the smallest nouns the rest of the client is written in.</p>  </article> <nav class="chapter-nav" aria-label="Chapter navigation"><div class="chapter-nav-item"></div><div class="chapter-nav-item chapter-nav-item-next"><a href="/monad-client-book/01-foundation-types-and-crypto/"><span class="chapter-nav-label">Next</span>Chapter 1: Foundation — Types and Cryptography →
+</a></div></nav> </main> <aside class="chapter-tools"> <section class="tools-panel" aria-label="Table of contents"> <h2>On this page</h2> <ul class="toc-list"> <li> <a class="toc-link depth-2" href="#what-this-book-is"> What This Book Is </a> </li><li> <a class="toc-link depth-2" href="#what-this-book-is-not"> What This Book Is Not </a> </li><li> <a class="toc-link depth-2" href="#the-first-picture-to-lock-in"> The First Picture To Lock In </a> </li><li> <a class="toc-link depth-2" href="#one-client-two-repos-one-shared-execution-library"> One Client, Two Repos, One Shared Execution Library </a> </li><li> <a class="toc-link depth-2" href="#one-node-usually-three-processes"> One Node, Usually Three Processes </a> </li><li> <a class="toc-link depth-2" href="#why-monad-bft-still-contains-monad-execution"> Why monad-bft Still Contains monad-execution/ </a> </li><li> <a class="toc-link depth-2" href="#the-runtime-boundaries-that-actually-matter"> The Runtime Boundaries That Actually Matter </a> </li><li> <a class="toc-link depth-2" href="#one-transaction-end-to-end"> One Transaction, End To End </a> </li><li> <a class="toc-link depth-3" href="#the-short-story"> The Short Story </a> </li><li> <a class="toc-link depth-3" href="#the-same-story-with-boundaries-called-out"> The Same Story With Boundaries Called Out </a> </li><li> <a class="toc-link depth-2" href="#delayed-execution-in-one-first-pass-timeline"> Delayed Execution In One First-Pass Timeline </a> </li><li> <a class="toc-link depth-2" href="#the-three-main-clocks"> The Three Main Clocks </a> </li><li> <a class="toc-link depth-2" href="#two-more-round-words-you-must-not-blur"> Two More Round Words You Must Not Blur </a> </li><li> <a class="toc-link depth-2" href="#freshness-words-proposed-voted-finalized"> Freshness Words: proposed, voted, finalized </a> </li><li> <a class="toc-link depth-2" href="#the-main-read-surfaces"> The Main Read Surfaces </a> </li><li> <a class="toc-link depth-2" href="#a-working-glossary"> A Working Glossary </a> </li><li> <a class="toc-link depth-2" href="#repo-map"> Repo Map </a> </li><li> <a class="toc-link depth-3" href="#monad-bft"> monad-bft </a> </li><li> <a class="toc-link depth-3" href="#monad"> monad </a> </li><li> <a class="toc-link depth-2" href="#how-to-use-this-book"> How To Use This Book </a> </li><li> <a class="toc-link depth-2" href="#what-to-keep-in-your-head-before-chapter-1"> What To Keep In Your Head Before Chapter 1 </a> </li> </ul> </section> </aside> </div> <div class="mermaid-modal" data-mermaid-modal hidden role="dialog" aria-modal="true" aria-labelledby="mermaid-modal-title"> <div class="mermaid-modal-shell"> <div class="mermaid-modal-toolbar"> <p class="mermaid-modal-title" id="mermaid-modal-title">Diagram</p> <div class="mermaid-modal-actions"> <button type="button" class="mermaid-modal-action" data-mermaid-fit>
+Fit
+</button> <button type="button" class="mermaid-modal-action" data-mermaid-reset>
+Reset
+</button> <button type="button" class="mermaid-modal-action" data-mermaid-close aria-label="Close expanded diagram">
+Close
+</button> </div> </div> <div class="mermaid-modal-stage"> <div class="mermaid-modal-canvas" data-mermaid-canvas></div> </div> </div> </div> <script type="module" src="/monad-client-book/_astro/BookLayout.astro_astro_type_script_index_0_lang.Cmw0jMFF.js"></script> </body> </html>

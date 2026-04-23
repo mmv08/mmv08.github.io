@@ -1,0 +1,272 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="generator" content="Astro v6.1.9"><title>Chapter 4: The Consensus Protocol</title><meta property="og:title" content="Chapter 4: The Consensus Protocol"><meta property="og:image" content="https://mmv08.github.io/monad-client-book/og-image.png"><link rel="stylesheet" href="/monad-client-book/_astro/book.np3A6oR_.css"></head> <body data-has-toc="true" data-has-mermaid="true"> <button class="menu-toggle" id="menuToggle" aria-label="Toggle menu">☰</button> <div class="page "> <aside class="sidebar" id="sidebar"> <p class="sidebar-title"><a href="/monad-client-book/">Monad Client Book</a></p> <nav> <ul> <li> <a href="/monad-client-book/00-introduction/" class> The Monad Client: A Bottom-Up Code Walkthrough </a> </li><li> <a href="/monad-client-book/01-foundation-types-and-crypto/" class> Chapter 1: Foundation — Types and Cryptography </a> </li><li> <a href="/monad-client-book/02-validators-epochs-and-leader-election/" class> Chapter 2: Validators, Epochs, and Leader Election </a> </li><li> <a href="/monad-client-book/03-consensus-data-structures/" class> Chapter 3: Consensus Data Structures </a> </li><li> <a href="/monad-client-book/04-the-consensus-protocol/" class="active"> Chapter 4: The Consensus Protocol </a> </li><li> <a href="/monad-client-book/05-chain-config-forkpoints-and-sync/" class> Chapter 5: Chain Config, Forkpoints, Restart, and Sync </a> </li><li> <a href="/monad-client-book/06-execution-and-evm/" class> Chapter 6: Execution Boundary and Process Architecture </a> </li><li> <a href="/monad-client-book/07-execution-data-model-and-state-transition/" class> Chapter 7: Execution Data Model and State Transition </a> </li><li> <a href="/monad-client-book/08-execution-services-triedb-events-and-hosted-apis/" class> Chapter 8: Execution Services — Triedb, Event Rings, and Hosted APIs </a> </li><li> <a href="/monad-client-book/09-transaction-pool-and-fee-market/" class> Chapter 9: Transaction Pool and Fee Market </a> </li><li> <a href="/monad-client-book/10-networking-and-p2p/" class> Chapter 10: Networking and Peer-to-Peer Communication </a> </li><li> <a href="/monad-client-book/11-storage-and-state/" class> Chapter 11: Storage and State </a> </li><li> <a href="/monad-client-book/12-node-assembly-and-rpc/" class> Chapter 12: Node Assembly and RPC </a> </li><li> <a href="/monad-client-book/13-failure-modes-and-defenses/" class> Chapter 13: Failure Modes and Defenses </a> </li><li> <a href="/monad-client-book/14-testing-and-simulation/" class> Chapter 14: Testing and Simulation </a> </li><li> <a href="/monad-client-book/15-how-monad-differs-from-ethereum/" class> Chapter 15: How Monad Differs From Ethereum </a> </li><li> <a href="/monad-client-book/16-glossary-timelines-and-reading-maps/" class> Appendix: Glossary, Timelines, and Reading Maps </a> </li> </ul> </nav> </aside> <main class="main"> <header class="page-header"> <h1>Chapter 4: The Consensus Protocol</h1> <div class="source-meta"> <span class="source-path">monad-client-book/04-the-consensus-protocol.md</span> <a class="source-link" href="https://github.com/mmv08/category-labs-notes/blob/main/monad-client-book/04-the-consensus-protocol.md" target="_blank" rel="noreferrer">
+View source →
+</a> </div> </header> <article class="book-content">  <p>The previous chapter covered the documents. This chapter covers the behavior: how proposals are filtered and handled, how certificates advance rounds, how blocks move from valid to coherent to committed, how votes become QCs, how timeouts become TCs, and how recovery decides between reusing a tip and going fresh.</p>
+<p>The best single doorway into this chapter is still <code>handle_proposal_message()</code> in <code>monad-consensus-state</code>. But that function only becomes readable once you know which machines are cooperating with it.</p>
+<h2 id="why-this-chapter-matters">Why This Chapter Matters<a class="heading-anchor" aria-label="Link to this section" href="#why-this-chapter-matters">#</a></h2>
+<p>The code stops looking like “one giant pile of consensus if-statements” once you see that several small state machines are cooperating — pacemaker, vote state, safety, blocktree, and no-endorsement state — each protecting a different invariant. This chapter is about those invariants.</p>
+<h2 id="41-the-state-machine-shape">4.1 The State-Machine Shape<a class="heading-anchor" aria-label="Link to this section" href="#41-the-state-machine-shape">#</a></h2>
+<p><code>MonadState</code> is the node’s top-level consensus state machine, defined in <a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-state/src/lib.rs"><code>monad-state/src/lib.rs</code></a>. It owns the pacemaker, safety rules, blocktree, vote state, and sync-mode logic. When a new event arrives, this type is the thing that <code>update(...)</code> is called on.</p>
+<p>At a high level, the node runs a repeating pattern:</p>
+<ol>
+<li>some subsystem emits an event</li>
+<li><code>MonadState</code> consumes the event</li>
+<li>internal state changes</li>
+<li>commands are emitted back out to child subsystems</li>
+</ol>
+<p>That means the code is easiest to read in two halves: internal state machines, and external side-effect executors. The main consensus-side machines are:</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Component</th><th>Job</th><th>Main invariant</th></tr></thead><tbody><tr><td><code>Pacemaker</code></td><td>round advancement and timeout handling</td><td>never move backward in round-space</td></tr><tr><td><code>VoteState</code></td><td>vote accumulation and QC creation</td><td>one vote statement per validator per round path</td></tr><tr><td><code>Safety</code></td><td>honest-node self-defense</td><td>do not locally help conflicting proof paths form</td></tr><tr><td><code>BlockTree</code></td><td>live uncommitted block graph</td><td>remember valid blocks even before full coherency</td></tr><tr><td><code>NoEndorsementState</code></td><td>refusal aggregation</td><td>do not build fresh-proposal authority sloppily</td></tr></tbody></table>
+<h2 id="42-one-event-to-command-story">4.2 One Event-To-Command Story<a class="heading-anchor" aria-label="Link to this section" href="#42-one-event-to-command-story">#</a></h2>
+<p>The abstract shape becomes easier once you see one concrete path.</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="mermaid"><code><span class="line"><span style="color:#E1E4E8">sequenceDiagram</span></span>
+<span class="line"><span style="color:#E1E4E8">    participant Router as Router / timer / updater</span></span>
+<span class="line"><span style="color:#E1E4E8">    participant State as MonadState</span></span>
+<span class="line"><span style="color:#E1E4E8">    participant CS as ConsensusState</span></span>
+<span class="line"><span style="color:#E1E4E8">    participant Exec as ParentExecutor children</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#E1E4E8">    Router->>State: event arrives</span></span>
+<span class="line"><span style="color:#E1E4E8">    State->>CS: handle event</span></span>
+<span class="line"><span style="color:#E1E4E8">    CS->>CS: mutate pacemaker / safety / blocktree / vote state</span></span>
+<span class="line"><span style="color:#E1E4E8">    CS-->>State: commands</span></span>
+<span class="line"><span style="color:#E1E4E8">    State-->>Exec: router, timer, ledger, txpool, statesync commands</span></span></code></pre>
+<p>That is why <code>main.rs</code> stays small.
+The protocol logic lives in the state machine, not in the outer process loop.</p>
+<h2 id="43-proposal-handling-does-not-start-at-handle_proposal_message">4.3 Proposal Handling Does Not Start At <code>handle_proposal_message()</code><a class="heading-anchor" aria-label="Link to this section" href="#43-proposal-handling-does-not-start-at-handle_proposal_message">#</a></h2>
+<p>This is important. <code>handle_proposal_message()</code> is the main proposal handler, but it is not the first gate. There is earlier prefiltering in <code>monad-state/src/consensus.rs</code> for things like stale traffic, obviously wrong message classes for the current mode, and messages that should not be processed in the node’s current status. So the actual path is:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="text"><code><span class="line"><span>network or updater input</span></span>
+<span class="line"><span>-> early prefilter</span></span>
+<span class="line"><span>-> consensus-state handler</span></span>
+<span class="line"><span>-> emitted commands</span></span></code></pre>
+<p>That matters because some defensive behavior lives before the state-machine method you are looking at.</p>
+<h2 id="44-pacemaker">4.4 <code>Pacemaker</code><a class="heading-anchor" aria-label="Link to this section" href="#44-pacemaker">#</a></h2>
+<p>The pacemaker owns the current round, the high certificate, and timeout collection state for the live round. Its job is simple to state and easy to underestimate: decide when the node may move forward in round-space.</p>
+<p>When a newer QC or TC arrives, the pacemaker can reject stale evidence, install a higher certificate, advance the current round, recompute the active epoch from round scheduling, clear no-longer-relevant timeout state, and emit commands for the next step. So a certificate is not passive historical data — it can immediately change the meaning of the round in which the rest of a proposal is judged.</p>
+<h2 id="45-votestate">4.5 <code>VoteState</code><a class="heading-anchor" aria-label="Link to this section" href="#45-votestate">#</a></h2>
+<p><code>VoteState</code> accumulates votes into QCs. The important behavior is that it buckets votes by statement, tracks what each validator has already contributed, and attempts aggregate-certificate creation when threshold stake exists.</p>
+<p>The design choice worth remembering is the failure behavior: invalid signatures are pruned surgically, and the entire round is not discarded if enough honest stake remains. That pattern repeats across the repo — remove the bad contribution, not the whole structure.</p>
+<h2 id="46-safety">4.6 <code>Safety</code><a class="heading-anchor" aria-label="Link to this section" href="#46-safety">#</a></h2>
+<p><code>Safety</code> is the honest node’s self-defense layer. It tracks monotonic local facts such as the highest vote round, highest proposal round, highest no-endorsement round, and highest recovery-request round.</p>
+<p>The spirit is simple: do not vote twice for the same or older round, do not propose twice for the same or older round, and do not help conflicting proof paths form. One especially useful check is the timeout-side logic that decides whether it is still safe to piggyback a vote inside a timeout message. That one boolean is small, but it protects a big safety story.</p>
+<h2 id="47-blocktree">4.7 <code>BlockTree</code><a class="heading-anchor" aria-label="Link to this section" href="#47-blocktree">#</a></h2>
+<p><code>BlockTree</code> is the node’s live in-memory view of uncommitted history. It is not the ledger, triedb, or archive — it is the working set of blocks the consensus engine is actively reasoning about.</p>
+<p>The crucial property is that <code>BlockTree</code> can hold blocks that are valid enough to store but not yet coherent enough to vote on. That is essential in a delayed-execution design. If the node refused to remember anything before full coherency was known, it would become fragile under out-of-order arrival, delayed state visibility, and missing-ancestor recovery.</p>
+<h2 id="48-the-proposal-path-step-by-step">4.8 The Proposal Path, Step By Step<a class="heading-anchor" aria-label="Link to this section" href="#48-the-proposal-path-step-by-step">#</a></h2>
+<p>The easiest way to read <code>handle_proposal_message()</code> is as a sequence of gates.</p>
+<h3 id="step-0-earlier-filtering-already-happened">Step 0: Earlier Filtering Already Happened<a class="heading-anchor" aria-label="Link to this section" href="#step-0-earlier-filtering-already-happened">#</a></h3>
+<p>By the time we are in this function, the message survived the cheapest rejection layer. That does not mean it is acceptable; it means it was worth deeper processing.</p>
+<h3 id="step-1-drop-proposals-that-are-already-behind-the-root">Step 1: Drop Proposals That Are Already Behind The Root<a class="heading-anchor" aria-label="Link to this section" href="#step-1-drop-proposals-that-are-already-behind-the-root">#</a></h3>
+<p>If the proposal round is already behind the committed root, the proposal is too old to matter and is dropped cheaply.</p>
+<h3 id="step-2-resolve-epoch-context">Step 2: Resolve Epoch Context<a class="heading-anchor" aria-label="Link to this section" href="#step-2-resolve-epoch-context">#</a></h3>
+<p>The node derives which epoch is active at <code>proposal_round</code> and which validator set and mapping apply there. This is why Chapter 2’s round-to-epoch scheduling matters so much.</p>
+<h3 id="step-3-process-embedded-certificates-first">Step 3: Process Embedded Certificates First<a class="heading-anchor" aria-label="Link to this section" href="#step-3-process-embedded-certificates-first">#</a></h3>
+<p>Before validating the rest of the proposal, the node processes the embedded certificates — the block’s QC, and the optional previous-round TC. This ordering matters because certificate processing may advance the pacemaker, which can change the round context in which the rest of the proposal must be judged. This is one of the easiest places to misread the code if you only skim top to bottom.</p>
+<h3 id="step-4-validate-the-proposal-round-story">Step 4: Validate The Proposal-Round Story<a class="heading-anchor" aria-label="Link to this section" href="#step-4-validate-the-proposal-round-story">#</a></h3>
+<p>Now the node checks proposal-round facts: is this proposal ahead of what is acceptable, is the sender the expected leader for <code>proposal_round</code>, and have we already handled another proposal for that round? This is proposal-message validation, not block validation yet.</p>
+<h3 id="step-5-validate-the-block-itself">Step 5: Validate The Block Itself<a class="heading-anchor" aria-label="Link to this section" href="#step-5-validate-the-block-itself">#</a></h3>
+<p>Then the node checks block-level facts: does the block author match the expected leader for <code>block_round</code>, do the signatures line up, does the body actually match the header’s <code>block_body_id</code>, and is the block structurally valid? This is where the difference between <code>proposal_round</code> and <code>block_round</code> stops being theoretical and becomes operational.</p>
+<h3 id="step-6-add-the-block-to-the-blocktree">Step 6: Add The Block To The <code>BlockTree</code><a class="heading-anchor" aria-label="Link to this section" href="#step-6-add-the-block-to-the-blocktree">#</a></h3>
+<p>Once structural validation succeeds, the block is stored. At this point it may still be not yet coherent and not yet voteable.</p>
+<h3 id="step-7-try-commit-logic">Step 7: Try Commit Logic<a class="heading-anchor" aria-label="Link to this section" href="#step-7-try-commit-logic">#</a></h3>
+<p>The new block and its QC relationships may make an ancestor committable. If so, the root moves forward, committed blocks are emitted in order, and irrelevant branches are pruned.</p>
+<h3 id="step-8-update-coherency">Step 8: Update Coherency<a class="heading-anchor" aria-label="Link to this section" href="#step-8-update-coherency">#</a></h3>
+<p>A newly added block or ancestor arrival may also make previously stored blocks become coherent. This is where the delayed-execution model becomes visible in consensus behavior. The node can move blocks through the following progression:</p>
+<ul>
+<li>invalid → rejected</li>
+<li>valid but missing ancestor → keep and request block sync</li>
+<li>valid but incoherent → keep but do not vote</li>
+<li>coherent → now eligible for vote logic</li>
+</ul>
+<h3 id="step-9-try-to-vote">Step 9: Try To Vote<a class="heading-anchor" aria-label="Link to this section" href="#step-9-try-to-vote">#</a></h3>
+<p>Only now does the node consider voting, and only if the block is coherent, proposal timing is acceptable, the proposal matches the live round context, and local safety allows the vote.</p>
+<h3 id="step-10-try-to-propose">Step 10: Try To Propose<a class="heading-anchor" aria-label="Link to this section" href="#step-10-try-to-propose">#</a></h3>
+<p>State changes can make the node eligible to propose immediately for the next round, which is why many handlers end by trying local proposal logic too.</p>
+<h2 id="49-the-validation-layers-in-one-table">4.9 The Validation Layers In One Table<a class="heading-anchor" aria-label="Link to this section" href="#49-the-validation-layers-in-one-table">#</a></h2>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Layer</th><th>Main question</th></tr></thead><tbody><tr><td>prefilter</td><td>should this be dropped cheaply before deeper work?</td></tr><tr><td>certificate processing</td><td>does embedded evidence change local round state?</td></tr><tr><td>structural validation</td><td>is the block well-formed and correctly signed?</td></tr><tr><td>coherency validation</td><td>does the block fit current chain and delayed-execution context?</td></tr><tr><td>safety gating</td><td>may this honest node vote or propose without self-contradiction?</td></tr></tbody></table>
+<p>This is a much better mental model than “the node validates the proposal.” There is no single one-step “proposal validation.”</p>
+<h2 id="410-invalid-incoherent-missing-ancestor-and-committable">4.10 Invalid, Incoherent, Missing Ancestor, And Committable<a class="heading-anchor" aria-label="Link to this section" href="#410-invalid-incoherent-missing-ancestor-and-committable">#</a></h2>
+<p>These words are close enough to blur together if you are not careful. They should stay separate.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>State</th><th>Meaning</th><th>Typical response</th></tr></thead><tbody><tr><td>invalid</td><td>the object itself fails validation</td><td>reject</td></tr><tr><td>missing ancestor</td><td>the object may be fine, but local ancestry is incomplete</td><td>request block sync</td></tr><tr><td>incoherent</td><td>the object is valid, but current delayed-execution context does not yet support voting</td><td>keep, but do not vote</td></tr><tr><td>committable</td><td>certified parent-child relationship is satisfied</td><td>commit the relevant ancestor if coherency also permits</td></tr></tbody></table>
+<p>This distinction explains why the node can store a block before it is safe to vote for it.</p>
+<h2 id="411-one-missing-ancestor-story">4.11 One Missing-Ancestor Story<a class="heading-anchor" aria-label="Link to this section" href="#411-one-missing-ancestor-story">#</a></h2>
+<p>Suppose a proposal for block <code>B</code> arrives. The node might learn that the message is not stale, the block is structurally fine, and the parent chain is incomplete locally. That is not the same thing as a bad block. The correct response is to keep what is useful, request block sync, and continue once ancestry arrives. This is why block sync is part of normal protocol operation, not just disaster recovery.</p>
+<h2 id="412-the-timeout-and-recovery-path">4.12 The Timeout And Recovery Path<a class="heading-anchor" aria-label="Link to this section" href="#412-the-timeout-and-recovery-path">#</a></h2>
+<p>Timeouts are a whole subprotocol, not one side path.</p>
+<p>The rough flow is:</p>
+<ol>
+<li>local or remote timeout evidence arrives</li>
+<li>timeout buckets accumulate stake</li>
+<li>enough timeout evidence may produce a TC</li>
+<li>the TC carries the best known extension hint</li>
+<li>recovery logic decides between:
+<ul>
+<li>reusing a tip</li>
+<li>refusing a tip</li>
+<li>acknowledging no usable tip</li>
+</ul>
+</li>
+<li>fresh proposal authority may later form through an <code>NEC</code> or <code>NoTipCertificate</code></li>
+</ol>
+<h2 id="413-the-recovery-decision-in-plain-english">4.13 The Recovery Decision In Plain English<a class="heading-anchor" aria-label="Link to this section" href="#413-the-recovery-decision-in-plain-english">#</a></h2>
+<p>The leader does not immediately jump from “timeout happened” to “build any fresh block you want.” It tries to preserve more structure than that. The recovery-side questions are:</p>
+<ol>
+<li>did the TC carry a reusable tip candidate?</li>
+<li>if yes, is that tip coherent and still worth reusing?</li>
+<li>if reused, do enough validators endorse that reuse?</li>
+<li>if not, do we now have explicit refusal proof (<code>NEC</code>) or no-tip proof (<code>NoTipCertificate</code>) that justifies a fresh proposal?</li>
+</ol>
+<p>That is why Chapters 3 and 4 need all of <code>TC</code>, <code>RoundRecoveryMessage</code>, <code>NoEndorsementMessage</code>, <code>NEC</code>, <code>NoTipCertificate</code>, and <code>FreshProposalCertificate</code>. The recovery protocol is not one fallback flag — it is a small proof-driven state machine of its own.</p>
+<h2 id="414-one-happy-path-round">4.14 One Happy-Path Round<a class="heading-anchor" aria-label="Link to this section" href="#414-one-happy-path-round">#</a></h2>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="mermaid"><code><span class="line"><span style="color:#E1E4E8">sequenceDiagram</span></span>
+<span class="line"><span style="color:#E1E4E8">    participant Leader as Leader r</span></span>
+<span class="line"><span style="color:#E1E4E8">    participant Validators as Validators</span></span>
+<span class="line"><span style="color:#E1E4E8">    participant Next as Leader r+1</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#E1E4E8">    Leader->>Validators: ProposalMessage</span></span>
+<span class="line"><span style="color:#E1E4E8">    Validators->>Validators: prefilter, process certs, validate, store, coherency check</span></span>
+<span class="line"><span style="color:#E1E4E8">    Validators->>Next: VoteMessage</span></span>
+<span class="line"><span style="color:#E1E4E8">    Next->>Next: VoteState forms QC</span></span>
+<span class="line"><span style="color:#E1E4E8">    Next->>Validators: round-advance effects</span></span>
+<span class="line"><span style="color:#E1E4E8">    Validators->>Validators: Pacemaker enters next round</span></span></code></pre>
+<p>That is the backbone.
+The real code adds more guards, but not a different overall shape.</p>
+<h2 id="415-one-recovery-path-round">4.15 One Recovery-Path Round<a class="heading-anchor" aria-label="Link to this section" href="#415-one-recovery-path-round">#</a></h2>
+<p>The recovery backbone is:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="text"><code><span class="line"><span>proposal stalls</span></span>
+<span class="line"><span>-> validators timeout</span></span>
+<span class="line"><span>-> TC forms</span></span>
+<span class="line"><span>-> pacemaker advances</span></span>
+<span class="line"><span>-> recovery logic inspects TC.high_extend</span></span>
+<span class="line"><span>-> try reusing tip if possible</span></span>
+<span class="line"><span>-> otherwise gather fresh-proposal authority</span></span>
+<span class="line"><span>-> new proposal path resumes</span></span></code></pre>
+<p>That is the recovery-side skeleton to keep in your head while reading the code.</p>
+<h2 id="open-these-files-first">Open These Files First<a class="heading-anchor" aria-label="Link to this section" href="#open-these-files-first">#</a></h2>
+<ul>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-state/src/consensus.rs"><code>monad-state/src/consensus.rs</code></a>: prefiltering and message routing into consensus handlers</li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-consensus-state/src/lib.rs"><code>monad-consensus-state/src/lib.rs</code></a>: <code>handle_proposal_message</code>, <code>validate_block</code>, <code>process_tc</code>, <code>try_vote</code></li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-blocktree/src/blocktree.rs"><code>monad-blocktree/src/blocktree.rs</code></a>: live block graph and coherency progression</li>
+</ul>
+<h2 id="then-open-these">Then Open These<a class="heading-anchor" aria-label="Link to this section" href="#then-open-these">#</a></h2>
+<ul>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-consensus/src/pacemaker.rs"><code>monad-consensus/src/pacemaker.rs</code></a>: round advancement and timeout handling</li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-consensus/src/vote_state.rs"><code>monad-consensus/src/vote_state.rs</code></a>: QC creation</li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-consensus/src/validation/safety.rs"><code>monad-consensus/src/validation/safety.rs</code></a>: honest-node self-defense</li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-consensus/src/no_endorsement_state.rs"><code>monad-consensus/src/no_endorsement_state.rs</code></a>: NEC creation and fresh-proposal authority</li>
+</ul>
+<h2 id="then-keep-these-nearby">Then Keep These Nearby<a class="heading-anchor" aria-label="Link to this section" href="#then-keep-these-nearby">#</a></h2>
+<ul>
+<li><a href="/monad-client-book/16-glossary-timelines-and-reading-maps#recovery-objects-at-a-glance">Recovery Objects At A Glance</a></li>
+<li><a href="/monad-client-book/16-glossary-timelines-and-reading-maps#the-canonical-delayed-execution-timeline">Canonical Delayed-Execution Timeline</a></li>
+</ul>
+<h2 id="what-to-remember">What To Remember<a class="heading-anchor" aria-label="Link to this section" href="#what-to-remember">#</a></h2>
+<ul>
+<li>The node is an event-driven state machine that emits commands back out to subsystems.</li>
+<li>Proposal handling starts before <code>handle_proposal_message()</code> because prefiltering happens earlier.</li>
+<li>Embedded certificates are processed before later proposal checks because they can change the local round context.</li>
+<li><code>Pacemaker</code>, <code>VoteState</code>, <code>Safety</code>, <code>BlockTree</code>, and <code>NoEndorsementState</code> each protect different invariants.</li>
+<li>Valid, missing-ancestor, incoherent, and committable are different states with different responses.</li>
+<li>Timeout handling is a real recovery subprotocol, not one fallback branch.</li>
+<li>Fresh proposal authority is proof-driven; it does not appear just because a round timed out.</li>
+</ul>
+<p>The next chapter stays on the consensus side and answers a practical question the live-protocol chapter deliberately skipped: how a real node restarts, catches up, and becomes live again.</p>  </article> <nav class="chapter-nav" aria-label="Chapter navigation"><div class="chapter-nav-item"><a href="/monad-client-book/03-consensus-data-structures/"><span class="chapter-nav-label">Previous</span>
+← Chapter 3: Consensus Data Structures</a></div><div class="chapter-nav-item chapter-nav-item-next"><a href="/monad-client-book/05-chain-config-forkpoints-and-sync/"><span class="chapter-nav-label">Next</span>Chapter 5: Chain Config, Forkpoints, Restart, and Sync →
+</a></div></nav> </main> <aside class="chapter-tools"> <section class="tools-panel" aria-label="Table of contents"> <h2>On this page</h2> <ul class="toc-list"> <li> <a class="toc-link depth-2" href="#why-this-chapter-matters"> Why This Chapter Matters </a> </li><li> <a class="toc-link depth-2" href="#41-the-state-machine-shape"> 4.1 The State-Machine Shape </a> </li><li> <a class="toc-link depth-2" href="#42-one-event-to-command-story"> 4.2 One Event-To-Command Story </a> </li><li> <a class="toc-link depth-2" href="#43-proposal-handling-does-not-start-at-handle_proposal_message"> 4.3 Proposal Handling Does Not Start At handle_proposal_message() </a> </li><li> <a class="toc-link depth-2" href="#44-pacemaker"> 4.4 Pacemaker </a> </li><li> <a class="toc-link depth-2" href="#45-votestate"> 4.5 VoteState </a> </li><li> <a class="toc-link depth-2" href="#46-safety"> 4.6 Safety </a> </li><li> <a class="toc-link depth-2" href="#47-blocktree"> 4.7 BlockTree </a> </li><li> <a class="toc-link depth-2" href="#48-the-proposal-path-step-by-step"> 4.8 The Proposal Path, Step By Step </a> </li><li> <a class="toc-link depth-3" href="#step-0-earlier-filtering-already-happened"> Step 0: Earlier Filtering Already Happened </a> </li><li> <a class="toc-link depth-3" href="#step-1-drop-proposals-that-are-already-behind-the-root"> Step 1: Drop Proposals That Are Already Behind The Root </a> </li><li> <a class="toc-link depth-3" href="#step-2-resolve-epoch-context"> Step 2: Resolve Epoch Context </a> </li><li> <a class="toc-link depth-3" href="#step-3-process-embedded-certificates-first"> Step 3: Process Embedded Certificates First </a> </li><li> <a class="toc-link depth-3" href="#step-4-validate-the-proposal-round-story"> Step 4: Validate The Proposal-Round Story </a> </li><li> <a class="toc-link depth-3" href="#step-5-validate-the-block-itself"> Step 5: Validate The Block Itself </a> </li><li> <a class="toc-link depth-3" href="#step-6-add-the-block-to-the-blocktree"> Step 6: Add The Block To The BlockTree </a> </li><li> <a class="toc-link depth-3" href="#step-7-try-commit-logic"> Step 7: Try Commit Logic </a> </li><li> <a class="toc-link depth-3" href="#step-8-update-coherency"> Step 8: Update Coherency </a> </li><li> <a class="toc-link depth-3" href="#step-9-try-to-vote"> Step 9: Try To Vote </a> </li><li> <a class="toc-link depth-3" href="#step-10-try-to-propose"> Step 10: Try To Propose </a> </li><li> <a class="toc-link depth-2" href="#49-the-validation-layers-in-one-table"> 4.9 The Validation Layers In One Table </a> </li><li> <a class="toc-link depth-2" href="#410-invalid-incoherent-missing-ancestor-and-committable"> 4.10 Invalid, Incoherent, Missing Ancestor, And Committable </a> </li><li> <a class="toc-link depth-2" href="#411-one-missing-ancestor-story"> 4.11 One Missing-Ancestor Story </a> </li><li> <a class="toc-link depth-2" href="#412-the-timeout-and-recovery-path"> 4.12 The Timeout And Recovery Path </a> </li><li> <a class="toc-link depth-2" href="#413-the-recovery-decision-in-plain-english"> 4.13 The Recovery Decision In Plain English </a> </li><li> <a class="toc-link depth-2" href="#414-one-happy-path-round"> 4.14 One Happy-Path Round </a> </li><li> <a class="toc-link depth-2" href="#415-one-recovery-path-round"> 4.15 One Recovery-Path Round </a> </li><li> <a class="toc-link depth-2" href="#open-these-files-first"> Open These Files First </a> </li><li> <a class="toc-link depth-2" href="#then-open-these"> Then Open These </a> </li><li> <a class="toc-link depth-2" href="#then-keep-these-nearby"> Then Keep These Nearby </a> </li><li> <a class="toc-link depth-2" href="#what-to-remember"> What To Remember </a> </li> </ul> </section> </aside> </div> <div class="mermaid-modal" data-mermaid-modal hidden role="dialog" aria-modal="true" aria-labelledby="mermaid-modal-title"> <div class="mermaid-modal-shell"> <div class="mermaid-modal-toolbar"> <p class="mermaid-modal-title" id="mermaid-modal-title">Diagram</p> <div class="mermaid-modal-actions"> <button type="button" class="mermaid-modal-action" data-mermaid-fit>
+Fit
+</button> <button type="button" class="mermaid-modal-action" data-mermaid-reset>
+Reset
+</button> <button type="button" class="mermaid-modal-action" data-mermaid-close aria-label="Close expanded diagram">
+Close
+</button> </div> </div> <div class="mermaid-modal-stage"> <div class="mermaid-modal-canvas" data-mermaid-canvas></div> </div> </div> </div> <script type="module" src="/monad-client-book/_astro/BookLayout.astro_astro_type_script_index_0_lang.Cmw0jMFF.js"></script> </body> </html>

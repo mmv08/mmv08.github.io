@@ -1,0 +1,152 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="generator" content="Astro v6.1.9"><title>Chapter 15: How Monad Differs From Ethereum</title><meta property="og:title" content="Chapter 15: How Monad Differs From Ethereum"><meta property="og:image" content="https://mmv08.github.io/monad-client-book/og-image.png"><link rel="stylesheet" href="/monad-client-book/_astro/book.np3A6oR_.css"></head> <body data-has-toc="true"> <button class="menu-toggle" id="menuToggle" aria-label="Toggle menu">☰</button> <div class="page "> <aside class="sidebar" id="sidebar"> <p class="sidebar-title"><a href="/monad-client-book/">Monad Client Book</a></p> <nav> <ul> <li> <a href="/monad-client-book/00-introduction/" class> The Monad Client: A Bottom-Up Code Walkthrough </a> </li><li> <a href="/monad-client-book/01-foundation-types-and-crypto/" class> Chapter 1: Foundation — Types and Cryptography </a> </li><li> <a href="/monad-client-book/02-validators-epochs-and-leader-election/" class> Chapter 2: Validators, Epochs, and Leader Election </a> </li><li> <a href="/monad-client-book/03-consensus-data-structures/" class> Chapter 3: Consensus Data Structures </a> </li><li> <a href="/monad-client-book/04-the-consensus-protocol/" class> Chapter 4: The Consensus Protocol </a> </li><li> <a href="/monad-client-book/05-chain-config-forkpoints-and-sync/" class> Chapter 5: Chain Config, Forkpoints, Restart, and Sync </a> </li><li> <a href="/monad-client-book/06-execution-and-evm/" class> Chapter 6: Execution Boundary and Process Architecture </a> </li><li> <a href="/monad-client-book/07-execution-data-model-and-state-transition/" class> Chapter 7: Execution Data Model and State Transition </a> </li><li> <a href="/monad-client-book/08-execution-services-triedb-events-and-hosted-apis/" class> Chapter 8: Execution Services — Triedb, Event Rings, and Hosted APIs </a> </li><li> <a href="/monad-client-book/09-transaction-pool-and-fee-market/" class> Chapter 9: Transaction Pool and Fee Market </a> </li><li> <a href="/monad-client-book/10-networking-and-p2p/" class> Chapter 10: Networking and Peer-to-Peer Communication </a> </li><li> <a href="/monad-client-book/11-storage-and-state/" class> Chapter 11: Storage and State </a> </li><li> <a href="/monad-client-book/12-node-assembly-and-rpc/" class> Chapter 12: Node Assembly and RPC </a> </li><li> <a href="/monad-client-book/13-failure-modes-and-defenses/" class> Chapter 13: Failure Modes and Defenses </a> </li><li> <a href="/monad-client-book/14-testing-and-simulation/" class> Chapter 14: Testing and Simulation </a> </li><li> <a href="/monad-client-book/15-how-monad-differs-from-ethereum/" class="active"> Chapter 15: How Monad Differs From Ethereum </a> </li><li> <a href="/monad-client-book/16-glossary-timelines-and-reading-maps/" class> Appendix: Glossary, Timelines, and Reading Maps </a> </li> </ul> </nav> </aside> <main class="main"> <header class="page-header"> <h1>Chapter 15: How Monad Differs From Ethereum</h1> <div class="source-meta"> <span class="source-path">monad-client-book/15-how-monad-differs-from-ethereum.md</span> <a class="source-link" href="https://github.com/mmv08/category-labs-notes/blob/main/monad-client-book/15-how-monad-differs-from-ethereum.md" target="_blank" rel="noreferrer">
+View source →
+</a> </div> </header> <article class="book-content">  <p>Most of this book explained Monad on its own terms. That is the right way to learn a codebase, but it leaves one practical question open: which parts still feel like Ethereum, and which parts differ for structural reasons? Now that the internal mechanics are on the table, we can answer that question without flattening everything into slogans.</p>
+<h2 id="why-this-chapter-matters">Why This Chapter Matters<a class="heading-anchor" aria-label="Link to this section" href="#why-this-chapter-matters">#</a></h2>
+<p>If you compare Monad to Ethereum too early, you lose the Monad-specific invariants. If you compare them too late, you miss the practical intuition many engineers already have from Ethereum. The goal here is to be precise, not dramatic.</p>
+<h2 id="151-start-with-what-does-not-change">15.1 Start With What Does Not Change<a class="heading-anchor" aria-label="Link to this section" href="#151-start-with-what-does-not-change">#</a></h2>
+<p>Monad is still working with the core execution objects Ethereum developers already know: <em>accounts</em> (one entry per address, carrying a balance in native currency, a nonce that counts outgoing transactions, optional contract code, and per-contract storage, with the same Ethereum semantics); Ethereum-style <em>transactions</em> (signed payloads that either transfer value, deploy code, or call a contract, in the familiar RLP-encoded shape); <em>EVM bytecode</em> (the stack-based instruction format compiled contracts run on) along with <em>Solidity</em> contracts (the most common high-level language that compiles down to that bytecode); and the usual <em>receipts</em> (the per-transaction execution summary: status, gas used, logs emitted), <em>logs</em> (indexed events contracts emit for off-chain consumers), and familiar <em>JSON-RPC</em> method names (the HTTP+JSON wire protocol Ethereum clients expose to wallets and tools).</p>
+<p>That is why “Ethereum-compatible” is the right starting phrase. If you deploy an ordinary Solidity contract, the first mental model should still be “same EVM world.” The biggest differences are around ordering, execution timing, validator-set plumbing, stale-state safety rules, and gas accounting in current Monad revisions.</p>
+<h2 id="152-both-systems-split-consensus-and-execution-but-monad-pushes-the-split-further">15.2 Both Systems Split Consensus And Execution, But Monad Pushes The Split Further<a class="heading-anchor" aria-label="Link to this section" href="#152-both-systems-split-consensus-and-execution-but-monad-pushes-the-split-further">#</a></h2>
+<p>Modern Ethereum already has a consensus client and an execution client. So the existence of a split is not the difference. The deeper difference is that Ethereum executes the proposed block in the ordinary block-production cadence, while Monad orders blocks first and lets execution trail behind. That second step is the architectural leap that drives many other differences.</p>
+<h2 id="153-delayed-execution-is-the-biggest-structural-difference">15.3 Delayed Execution Is The Biggest Structural Difference<a class="heading-anchor" aria-label="Link to this section" href="#153-delayed-execution-is-the-biggest-structural-difference">#</a></h2>
+<p>Ethereum’s short mental model is “propose block <code>N</code>, execute block <code>N</code>, verify the resulting transition for block <code>N</code>.” Monad’s better mental model is “order block <code>N</code>, keep consensus moving, execute block <code>N</code> later, and carry finalized execution outputs for older work in later blocks.” That is why Monad block headers carry fields such as <code>execution_inputs</code> and <code>delayed_execution_results</code>. Those are not decorative — they are the visible shape of delayed execution.</p>
+<p>If you want the canonical worked timeline, go back to <a href="/monad-client-book/16-glossary-timelines-and-reading-maps">Chapter 16</a>. In this checkout, the examples in the book assume the current runtime wiring of <code>EXECUTION_DELAY = 3</code>.</p>
+<h2 id="154-coherency-matters-more-in-monad-because-ordering-sees-stale-state">15.4 Coherency Matters More In Monad Because Ordering Sees Stale State<a class="heading-anchor" aria-label="Link to this section" href="#154-coherency-matters-more-in-monad-because-ordering-sees-stale-state">#</a></h2>
+<p>Ethereum readers often use “valid” to mean almost everything. Monad needs a sharper word: “coherent.” Because execution is delayed, a block can be structurally valid but not yet coherent relative to the state knowledge the node currently has. That is why Monad consensus distinguishes invalid block, incoherent block, and missing ancestor more aggressively than many Ethereum mental models do.</p>
+<h2 id="155-reserve-balance-exists-because-ordering-happens-before-fresh-execution">15.5 Reserve Balance Exists Because Ordering Happens Before Fresh Execution<a class="heading-anchor" aria-label="Link to this section" href="#155-reserve-balance-exists-because-ordering-happens-before-fresh-execution">#</a></h2>
+<p>Reserve balance is one of the clearest Monad-only rules.</p>
+<h3 id="ethereum">Ethereum<a class="heading-anchor" aria-label="Link to this section" href="#ethereum">#</a></h3>
+<p>Ethereum execution sees the state it is about to mutate. It does not need a special delayed-window reserve rule to protect against stale-state overbooking during ordering.</p>
+<h3 id="monad">Monad<a class="heading-anchor" aria-label="Link to this section" href="#monad">#</a></h3>
+<p>Monad leaders and validators order new transactions while execution is lagging. So they need protection against promising more spend than the stale ordering window can safely justify. That is what reserve balance provides. It is not just a mempool heuristic — it is a cross-layer safety rule, with Rust-side policy checks during ordering and C++ execution enforcement when execution catches up.</p>
+<h2 id="156-reserve-balance-enforcement-and-reserve-balance-precompile-exposure-are-different">15.6 Reserve-Balance Enforcement And Reserve-Balance Precompile Exposure Are Different<a class="heading-anchor" aria-label="Link to this section" href="#156-reserve-balance-enforcement-and-reserve-balance-precompile-exposure-are-different">#</a></h2>
+<p>These two ideas must stay separate.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Concept</th><th>Current gate in code</th><th>Meaning</th></tr></thead><tbody><tr><td>reserve-balance enforcement</td><td><code>MONAD_FOUR+</code></td><td>validation and execution enforce the rule</td></tr><tr><td>reserve-balance precompile exposure</td><td><code>MONAD_NINE+</code></td><td>contracts and tools can query reserve-balance information through the precompile</td></tr></tbody></table>
+<p>If you merge those into one sentence, the revision story becomes wrong.</p>
+<h2 id="157-monad-blocks-carry-more-cross-time-bookkeeping-than-ethereum-blocks">15.7 Monad Blocks Carry More Cross-Time Bookkeeping Than Ethereum Blocks<a class="heading-anchor" aria-label="Link to this section" href="#157-monad-blocks-carry-more-cross-time-bookkeeping-than-ethereum-blocks">#</a></h2>
+<p>An Ethereum block mainly carries the current payload and the current execution result. A Monad block can also carry the current execution request for this ordered block plus delayed execution results for older blocks. That is why later Monad blocks may help finalize earlier execution work.</p>
+<p>So a useful comparison is: Ethereum block <code>N</code> is mostly about executing block <code>N</code>, while Monad block <code>N</code> is about ordering block <code>N</code> and possibly carrying finalized execution information for older delayed work. That bookkeeping requirement is a direct consequence of delayed execution.</p>
+<h2 id="158-validator-set-plumbing-lives-closer-to-execution-in-monad">15.8 Validator-Set Plumbing Lives Closer To Execution In Monad<a class="heading-anchor" aria-label="Link to this section" href="#158-validator-set-plumbing-lives-closer-to-execution-in-monad">#</a></h2>
+<p>Ethereum validators stake through execution-side objects like the <em>deposit contract</em> — a specific contract at a fixed address on Ethereum’s execution layer that receives staking deposits and emits events the beacon chain reads — but active validator accounting and duties are much more consensus-side from the reader’s point of view.</p>
+<p>Monad moves validator-set plumbing closer to execution state. In the current code, staking is exposed as a protocol precompile from <code>MONAD_FOUR</code>, staking state lives in execution-owned storage, and consensus reads validator-set data from execution state through triedb-backed paths. That is why <code>read_valset(...)</code> and its boundary-delay behavior matter so much. In Monad, validator-set transitions are not only a consensus-local story — they are tightly coupled to execution-visible staking state.</p>
+<h2 id="159-monad-makes-protocol-owned-execution-work-more-explicit">15.9 Monad Makes Protocol-Owned Execution Work More Explicit<a class="heading-anchor" aria-label="Link to this section" href="#159-monad-makes-protocol-owned-execution-work-more-explicit">#</a></h2>
+<p>Ethereum has protocol-managed effects too. Monad makes more of that work explicit as deterministic system transactions that both sides of the boundary must derive the same way. That is especially visible around rewards, snapshots, and epoch changes. The point is not cosmetic — it keeps protocol-owned execution work visible, reviewable, and testable as ordered transaction-like objects.</p>
+<h2 id="1510-gas-accounting-needs-very-careful-wording">15.10 Gas Accounting Needs Very Careful Wording<a class="heading-anchor" aria-label="Link to this section" href="#1510-gas-accounting-needs-very-careful-wording">#</a></h2>
+<p>This is one of the easiest places to say something half-true.</p>
+<h3 id="on-chain-monad-transaction-execution">On-Chain Monad Transaction Execution<a class="heading-anchor" aria-label="Link to this section" href="#on-chain-monad-transaction-execution">#</a></h3>
+<p>In current Monad execution behavior, the Monad-specific transaction gas path makes a different choice from Ethereum’s familiar refund-heavy mental model. The execution tests show that in Monad revisions starting from <code>MONAD_ONE</code>, gas refunds are effectively zero in the Monad path, so the full gas limit is what matters economically. The practical consequence is that oversized gas limits are more expensive than many Ethereum developers expect. That lines up with delayed execution’s need to reason conservatively about gas obligation up front.</p>
+<h3 id="hosted-eth_call-is-not-the-same-thing-as-on-chain-fee-charging">Hosted <code>eth_call</code> Is Not The Same Thing As On-Chain Fee Charging<a class="heading-anchor" aria-label="Link to this section" href="#hosted-eth_call-is-not-the-same-thing-as-on-chain-fee-charging">#</a></h3>
+<p>Now the caveat. Hosted <code>eth_call</code> uses the same execution library, but it is still a local simulation surface — it does not mutate chain state, it does not include a transaction in a canonical block, and it does not charge actual network fees.</p>
+<p>So the precise statement is that on-chain Monad transaction accounting follows Monad revision rules during real block execution; hosted <code>eth_call</code> does not charge fees; the top-level hosted result still reports actual gas used; and traced final call frames can still report <code>gas_used</code> equal to the gas limit because refunds are zero in current Monad revisions. That distinction matters because “the same execution library is used” does not mean “RPC simulation and block inclusion are economically identical events.”</p>
+<h2 id="1511-protocol-precompiles-are-stricter-than-ordinary-contracts">15.11 Protocol Precompiles Are Stricter Than Ordinary Contracts<a class="heading-anchor" aria-label="Link to this section" href="#1511-protocol-precompiles-are-stricter-than-ordinary-contracts">#</a></h2>
+<p>Staking in Monad is not just a normal user contract at a special address. It is a protocol precompile. That matters because the entry path in <code>monad_precompiles.cpp</code> enforces precompile-specific call semantics. The important mental model is that it looks contract-like from the outside, but it behaves like protocol machinery, not like an arbitrary deployed contract. That is why wording such as “staking contract” is directionally useful but incomplete. The more accurate phrasing is “staking precompile with protocol-owned call semantics.”</p>
+<h2 id="1512-monads-fee-header-carries-more-state-than-ethereums-familiar-default-picture">15.12 Monad’s Fee Header Carries More State Than Ethereum’s Familiar Default Picture<a class="heading-anchor" aria-label="Link to this section" href="#1512-monads-fee-header-carries-more-state-than-ethereums-familiar-default-picture">#</a></h2>
+<p>Ethereum readers are used to a single <code>baseFeePerGas</code> field. Monad headers currently carry <code>base_fee</code>, <code>base_fee_trend</code>, and <code>base_fee_moment</code>. You do not need the full fee equation here — the important point is simpler: Monad’s current fee-market control plane carries more explicit fee-state than Ethereum’s most familiar one-field mental model.</p>
+<h2 id="1513-a-compact-comparison-table">15.13 A Compact Comparison Table<a class="heading-anchor" aria-label="Link to this section" href="#1513-a-compact-comparison-table">#</a></h2>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Topic</th><th>Ethereum mental model</th><th>Monad mental model</th></tr></thead><tbody><tr><td>execution timing</td><td>execute the proposed block in the normal block cadence</td><td>order first, execute later</td></tr><tr><td>block contents</td><td>current payload and current result</td><td>current execution request plus delayed results for older work</td></tr><tr><td>stale-state protection</td><td>fresh execution state is close to ordering</td><td>ordering must protect against lagged-state overbooking</td></tr><tr><td>reserve balance</td><td>not needed as a delayed-ordering safety rule</td><td>needed to protect ordering under delayed execution</td></tr><tr><td>validator-set plumbing</td><td>staking visible from execution, but validator duties feel more consensus-local</td><td>consensus actively reads execution-owned staking state through triedb-backed paths</td></tr><tr><td>protocol-owned work</td><td>more implicit from this book’s point of view</td><td>more explicit system-transaction generation</td></tr><tr><td>gas accounting</td><td>developers expect refund-shaped economics</td><td>current Monad path is more gas-limit-oriented, with zero refunds in current Monad revisions</td></tr><tr><td>hosted <code>eth_call</code></td><td>simulation on top of Ethereum execution semantics</td><td>simulation on top of Monad execution semantics, but still not block-inclusion fee charging</td></tr><tr><td>fee header state</td><td>familiar focus on <code>baseFeePerGas</code></td><td>current header carries richer fee-state fields</td></tr></tbody></table>
+<h2 id="1514-the-right-final-comparison">15.14 The Right Final Comparison<a class="heading-anchor" aria-label="Link to this section" href="#1514-the-right-final-comparison">#</a></h2>
+<p>If you want one sentence that stays honest, use this: Monad keeps the EVM world that Ethereum developers recognize, but changes the ordering and execution relationship so deeply that several surrounding rules — especially coherency, reserve balance, validator-set reads, and gas accounting — have to change with it. That is the right high-level comparison after reading the whole book.</p>
+<h2 id="1515-architecture-current-code-current-caveat">15.15 Architecture, Current Code, Current Caveat<a class="heading-anchor" aria-label="Link to this section" href="#1515-architecture-current-code-current-caveat">#</a></h2>
+<blockquote>
+<p><strong>Architecture</strong>
+Monad keeps the EVM execution world but changes the ordering/execution relationship deeply enough that surrounding rules have to change with it.</p>
+</blockquote>
+<blockquote>
+<p><strong>Current code</strong>
+Delayed execution, reserve-balance enforcement, execution-backed validator reads, and richer fee-header state are all visible directly in the checked-out implementation.</p>
+</blockquote>
+<blockquote>
+<p><strong>Current caveat</strong>
+Hosted <code>eth_call</code> shares Monad execution rules underneath, but its user-visible outputs are not identical to block inclusion: the top-level result still reports actual gas used, while traced final call frames can still report <code>gas_used</code> equal to the gas limit because refunds are zero.</p>
+</blockquote>
+<h2 id="open-these-files-first">Open These Files First<a class="heading-anchor" aria-label="Link to this section" href="#open-these-files-first">#</a></h2>
+<ul>
+<li><a href="https://github.com/category-labs/monad/blob/613698c24cec49da31ae7d383307916876265070/cmd/monad/runloop_monad.cpp"><code>cmd/monad/runloop_monad.cpp</code></a>: delayed execution loop and delayed-result validation</li>
+<li><a href="https://github.com/category-labs/monad/blob/613698c24cec49da31ae7d383307916876265070/category/execution/monad/validate_monad_block.cpp"><code>category/execution/monad/validate_monad_block.cpp</code></a>: static Monad block validation</li>
+<li><a href="https://github.com/category-labs/monad/blob/613698c24cec49da31ae7d383307916876265070/category/execution/monad/reserve_balance.cpp"><code>category/execution/monad/reserve_balance.cpp</code></a>: reserve-balance enforcement and revision gates</li>
+<li><a href="https://github.com/category-labs/monad/blob/613698c24cec49da31ae7d383307916876265070/category/execution/monad/reserve_balance/reserve_balance_contract_test.cpp"><code>category/execution/monad/reserve_balance/reserve_balance_contract_test.cpp</code></a>: reserve-balance precompile behavior</li>
+<li><a href="https://github.com/category-labs/monad/blob/613698c24cec49da31ae7d383307916876265070/category/execution/monad/staking/read_valset.cpp"><code>category/execution/monad/staking/read_valset.cpp</code></a>: execution-backed validator-set reads</li>
+<li><a href="https://github.com/category-labs/monad/blob/613698c24cec49da31ae7d383307916876265070/category/execution/monad/monad_precompiles.cpp"><code>category/execution/monad/monad_precompiles.cpp</code></a>: protocol precompile routing and gates</li>
+<li><a href="https://github.com/category-labs/monad/blob/613698c24cec49da31ae7d383307916876265070/category/execution/monad/monad_transaction_gas.cpp"><code>category/execution/monad/monad_transaction_gas.cpp</code></a>: Monad gas-refund behavior</li>
+<li><a href="https://github.com/category-labs/monad/blob/613698c24cec49da31ae7d383307916876265070/category/execution/ethereum/execute_transaction_test.cpp"><code>category/execution/ethereum/execute_transaction_test.cpp</code></a>: gas-charging and refund expectations across revisions</li>
+<li><a href="https://github.com/category-labs/monad/blob/613698c24cec49da31ae7d383307916876265070/category/rpc/monad_executor_test.cpp"><code>category/rpc/monad_executor_test.cpp</code></a>: hosted execution and <code>eth_call</code>-visible gas semantics</li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-node/src/main.rs"><code>monad-node/src/main.rs</code></a>: current runtime wiring of <code>EXECUTION_DELAY = 3</code></li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-system-calls/src/lib.rs"><code>monad-system-calls/src/lib.rs</code></a>: deterministic system-transaction generation</li>
+</ul>  </article> <nav class="chapter-nav" aria-label="Chapter navigation"><div class="chapter-nav-item"><a href="/monad-client-book/14-testing-and-simulation/"><span class="chapter-nav-label">Previous</span>
+← Chapter 14: Testing and Simulation</a></div><div class="chapter-nav-item chapter-nav-item-next"><a href="/monad-client-book/16-glossary-timelines-and-reading-maps/"><span class="chapter-nav-label">Next</span>Appendix: Glossary, Timelines, and Reading Maps →
+</a></div></nav> </main> <aside class="chapter-tools"> <section class="tools-panel" aria-label="Table of contents"> <h2>On this page</h2> <ul class="toc-list"> <li> <a class="toc-link depth-2" href="#why-this-chapter-matters"> Why This Chapter Matters </a> </li><li> <a class="toc-link depth-2" href="#151-start-with-what-does-not-change"> 15.1 Start With What Does Not Change </a> </li><li> <a class="toc-link depth-2" href="#152-both-systems-split-consensus-and-execution-but-monad-pushes-the-split-further"> 15.2 Both Systems Split Consensus And Execution, But Monad Pushes The Split Further </a> </li><li> <a class="toc-link depth-2" href="#153-delayed-execution-is-the-biggest-structural-difference"> 15.3 Delayed Execution Is The Biggest Structural Difference </a> </li><li> <a class="toc-link depth-2" href="#154-coherency-matters-more-in-monad-because-ordering-sees-stale-state"> 15.4 Coherency Matters More In Monad Because Ordering Sees Stale State </a> </li><li> <a class="toc-link depth-2" href="#155-reserve-balance-exists-because-ordering-happens-before-fresh-execution"> 15.5 Reserve Balance Exists Because Ordering Happens Before Fresh Execution </a> </li><li> <a class="toc-link depth-3" href="#ethereum"> Ethereum </a> </li><li> <a class="toc-link depth-3" href="#monad"> Monad </a> </li><li> <a class="toc-link depth-2" href="#156-reserve-balance-enforcement-and-reserve-balance-precompile-exposure-are-different"> 15.6 Reserve-Balance Enforcement And Reserve-Balance Precompile Exposure Are Different </a> </li><li> <a class="toc-link depth-2" href="#157-monad-blocks-carry-more-cross-time-bookkeeping-than-ethereum-blocks"> 15.7 Monad Blocks Carry More Cross-Time Bookkeeping Than Ethereum Blocks </a> </li><li> <a class="toc-link depth-2" href="#158-validator-set-plumbing-lives-closer-to-execution-in-monad"> 15.8 Validator-Set Plumbing Lives Closer To Execution In Monad </a> </li><li> <a class="toc-link depth-2" href="#159-monad-makes-protocol-owned-execution-work-more-explicit"> 15.9 Monad Makes Protocol-Owned Execution Work More Explicit </a> </li><li> <a class="toc-link depth-2" href="#1510-gas-accounting-needs-very-careful-wording"> 15.10 Gas Accounting Needs Very Careful Wording </a> </li><li> <a class="toc-link depth-3" href="#on-chain-monad-transaction-execution"> On-Chain Monad Transaction Execution </a> </li><li> <a class="toc-link depth-3" href="#hosted-eth_call-is-not-the-same-thing-as-on-chain-fee-charging"> Hosted eth_call Is Not The Same Thing As On-Chain Fee Charging </a> </li><li> <a class="toc-link depth-2" href="#1511-protocol-precompiles-are-stricter-than-ordinary-contracts"> 15.11 Protocol Precompiles Are Stricter Than Ordinary Contracts </a> </li><li> <a class="toc-link depth-2" href="#1512-monads-fee-header-carries-more-state-than-ethereums-familiar-default-picture"> 15.12 Monad’s Fee Header Carries More State Than Ethereum’s Familiar Default Picture </a> </li><li> <a class="toc-link depth-2" href="#1513-a-compact-comparison-table"> 15.13 A Compact Comparison Table </a> </li><li> <a class="toc-link depth-2" href="#1514-the-right-final-comparison"> 15.14 The Right Final Comparison </a> </li><li> <a class="toc-link depth-2" href="#1515-architecture-current-code-current-caveat"> 15.15 Architecture, Current Code, Current Caveat </a> </li><li> <a class="toc-link depth-2" href="#open-these-files-first"> Open These Files First </a> </li> </ul> </section> </aside> </div>  <script type="module" src="/monad-client-book/_astro/BookLayout.astro_astro_type_script_index_0_lang.Cmw0jMFF.js"></script> </body> </html>

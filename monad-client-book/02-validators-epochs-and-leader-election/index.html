@@ -1,0 +1,206 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="generator" content="Astro v6.1.9"><title>Chapter 2: Validators, Epochs, and Leader Election</title><meta property="og:title" content="Chapter 2: Validators, Epochs, and Leader Election"><meta property="og:image" content="https://mmv08.github.io/monad-client-book/og-image.png"><link rel="stylesheet" href="/monad-client-book/_astro/book.np3A6oR_.css"></head> <body data-has-toc="true" data-has-mermaid="true"> <button class="menu-toggle" id="menuToggle" aria-label="Toggle menu">☰</button> <div class="page "> <aside class="sidebar" id="sidebar"> <p class="sidebar-title"><a href="/monad-client-book/">Monad Client Book</a></p> <nav> <ul> <li> <a href="/monad-client-book/00-introduction/" class> The Monad Client: A Bottom-Up Code Walkthrough </a> </li><li> <a href="/monad-client-book/01-foundation-types-and-crypto/" class> Chapter 1: Foundation — Types and Cryptography </a> </li><li> <a href="/monad-client-book/02-validators-epochs-and-leader-election/" class="active"> Chapter 2: Validators, Epochs, and Leader Election </a> </li><li> <a href="/monad-client-book/03-consensus-data-structures/" class> Chapter 3: Consensus Data Structures </a> </li><li> <a href="/monad-client-book/04-the-consensus-protocol/" class> Chapter 4: The Consensus Protocol </a> </li><li> <a href="/monad-client-book/05-chain-config-forkpoints-and-sync/" class> Chapter 5: Chain Config, Forkpoints, Restart, and Sync </a> </li><li> <a href="/monad-client-book/06-execution-and-evm/" class> Chapter 6: Execution Boundary and Process Architecture </a> </li><li> <a href="/monad-client-book/07-execution-data-model-and-state-transition/" class> Chapter 7: Execution Data Model and State Transition </a> </li><li> <a href="/monad-client-book/08-execution-services-triedb-events-and-hosted-apis/" class> Chapter 8: Execution Services — Triedb, Event Rings, and Hosted APIs </a> </li><li> <a href="/monad-client-book/09-transaction-pool-and-fee-market/" class> Chapter 9: Transaction Pool and Fee Market </a> </li><li> <a href="/monad-client-book/10-networking-and-p2p/" class> Chapter 10: Networking and Peer-to-Peer Communication </a> </li><li> <a href="/monad-client-book/11-storage-and-state/" class> Chapter 11: Storage and State </a> </li><li> <a href="/monad-client-book/12-node-assembly-and-rpc/" class> Chapter 12: Node Assembly and RPC </a> </li><li> <a href="/monad-client-book/13-failure-modes-and-defenses/" class> Chapter 13: Failure Modes and Defenses </a> </li><li> <a href="/monad-client-book/14-testing-and-simulation/" class> Chapter 14: Testing and Simulation </a> </li><li> <a href="/monad-client-book/15-how-monad-differs-from-ethereum/" class> Chapter 15: How Monad Differs From Ethereum </a> </li><li> <a href="/monad-client-book/16-glossary-timelines-and-reading-maps/" class> Appendix: Glossary, Timelines, and Reading Maps </a> </li> </ul> </nav> </aside> <main class="main"> <header class="page-header"> <h1>Chapter 2: Validators, Epochs, and Leader Election</h1> <div class="source-meta"> <span class="source-path">monad-client-book/02-validators-epochs-and-leader-election.md</span> <a class="source-link" href="https://github.com/mmv08/category-labs-notes/blob/main/monad-client-book/02-validators-epochs-and-leader-election.md" target="_blank" rel="noreferrer">
+View source →
+</a> </div> </header> <article class="book-content">  <p>Chapter 1 gave us the nouns. This chapter answers two practical questions: who is allowed to act right now, and who is expected to lead this round? Those answers are not hard-coded. They come from validator sets, locked epochs, execution-backed staking reads, epoch scheduling, and deterministic leader election.</p>
+<h2 id="why-this-chapter-matters">Why This Chapter Matters<a class="heading-anchor" aria-label="Link to this section" href="#why-this-chapter-matters">#</a></h2>
+<p>The easiest way to misunderstand Monad consensus is to imagine that validator membership changes at one clean instant. The current code is more exact than that: there are distinct moments for locking the next epoch, reading the next validator data, scheduling the start round, and activating the new validator set. If you blur those into one instant, later pacemaker and recovery code becomes much harder to trust.</p>
+<h2 id="21-what-consensus-actually-needs-from-a-validator-set">2.1 What Consensus Actually Needs From A Validator Set<a class="heading-anchor" aria-label="Link to this section" href="#21-what-consensus-actually-needs-from-a-validator-set">#</a></h2>
+<p>Consensus does not need “a list of validators” in the abstract.
+It needs stake-weighted answers to concrete questions:</p>
+<ul>
+<li>is this node a member?</li>
+<li>what is the total stake?</li>
+<li>how much stake signed this statement?</li>
+<li>has a <em>supermajority threshold</em> been crossed? — meaning has at least <code>2/3 * total_stake + 1</code> of the stake signed, the standard Byzantine fault tolerance bar for agreement</li>
+<li>has the <em>honest threshold</em> been crossed? — meaning has at least <code>1/3 * total_stake + 1</code> of the stake signed, which guarantees at least one honest validator is among the signers even if up to one-third of the stake is Byzantine</li>
+</ul>
+<p>That interface lives behind <code>ValidatorSetType</code>, the Rust trait (a set of required methods) that concrete validator-set types must implement. Think of it as the contract saying “any type that claims to be a validator set must answer these questions.” At a reader level, the important thing is not the trait name — it is the list of questions the trait exists to answer, because that list tells you what consensus really depends on.</p>
+<h2 id="22-creation-invariants">2.2 Creation Invariants<a class="heading-anchor" aria-label="Link to this section" href="#22-creation-invariants">#</a></h2>
+<p>The default <code>ValidatorSet</code> is simple on purpose: a map from <code>NodeId</code> to <code>Stake</code>, plus cached total stake. The constructor enforces a few invariants early — the set cannot be empty, zero-stake validators are rejected, and duplicate validators are rejected — which is why later code gets to assume it is working with a sane set.</p>
+<p>The threshold formulas are exactly what the code says: the supermajority bar is <code>2/3 * total_stake + 1</code>, and the honest threshold is <code>1/3 * total_stake + 1</code>. Signer-stake calculation rejects duplicate signers before summing, so one validator does not get to increase influence by appearing twice.</p>
+<h2 id="23-identity-versus-certificate-key-again">2.3 Identity Versus Certificate Key, Again<a class="heading-anchor" aria-label="Link to this section" href="#23-identity-versus-certificate-key-again">#</a></h2>
+<p>This distinction becomes operational here, not just theoretical. Consensus needs two related answers: which validator is this, and which key verifies this validator’s certificate contribution? That is why validator identity and certificate-verification keys are modeled separately — <code>NodeId</code> answers the first question, and <code>ValidatorMapping</code> answers the second.</p>
+<p>This matters in production because the current intuition is that validator identity is secp-shaped while certificate verification is BLS-shaped. So a later QC, TC, or NEC verification step needs both the validator set (for stake accounting) and the validator mapping (for certificate verification).</p>
+<h2 id="24-before-staking-activation-versus-after">2.4 Before Staking Activation Versus After<a class="heading-anchor" aria-label="Link to this section" href="#24-before-staking-activation-versus-after">#</a></h2>
+<p><em>Staking activation</em> is a configured epoch number in <code>MonadChainConfig</code> that marks when validator data starts coming from execution-side staking state instead of static node config. Before this epoch, the set is fixed at launch; after it, validators are determined by stake recorded in the staking contract.</p>
+<p>The validator-set lifecycle has two regimes.</p>
+<h3 id="before-staking-activation">Before Staking Activation<a class="heading-anchor" aria-label="Link to this section" href="#before-staking-activation">#</a></h3>
+<p>Before the locked epoch reaches <code>staking_activation</code>, the next validator data comes from config. That is still deterministic; it is just not yet execution-backed.</p>
+<h3 id="after-staking-activation">After Staking Activation<a class="heading-anchor" aria-label="Link to this section" href="#after-staking-activation">#</a></h3>
+<p>After the locked epoch reaches <code>staking_activation</code>, the next validator data comes from execution-backed staking state. That is where the repo boundary becomes real: consensus in <code>monad-bft</code> needs the next validator set, execution-owned staking state in <code>monad</code> provides it, and the bridge between them is a dedicated validator-set read path rather than a generic “read arbitrary contract storage” hack.</p>
+<h2 id="25-the-three-important-validator-views-on-the-execution-side">2.5 The Three Important Validator Views On The Execution Side<a class="heading-anchor" aria-label="Link to this section" href="#25-the-three-important-validator-views-on-the-execution-side">#</a></h2>
+<p>Once staking activation is live, consensus does not read one giant undifferentiated validator blob from execution.</p>
+<p>The execution side exposes more than one useful view:</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>View</th><th>What it means</th><th>Why it exists</th></tr></thead><tbody><tr><td>execution view</td><td>execution-side validator data such as keys and contract-owned metadata</td><td>execution needs the live contract state</td></tr><tr><td>consensus view</td><td>the stake-ordered set that consensus should use for the next admissible epoch read</td><td>consensus needs a cleaned-up selection view</td></tr><tr><td>snapshot view</td><td>the frozen current-epoch view used during the epoch-delay window</td><td>current-epoch reads must stay stable while the next epoch is being prepared</td></tr></tbody></table>
+<p>That split is why the validator-set reader feels narrower than a generic contract read. It is not trying to expose every staking detail; it is trying to expose the exact validator views consensus needs.</p>
+<h2 id="26-read_valset-is-deliberately-narrow">2.6 <code>read_valset(...)</code> Is Deliberately Narrow<a class="heading-anchor" aria-label="Link to this section" href="#26-read_valset-is-deliberately-narrow">#</a></h2>
+<p><code>read_valset(db, block_num, requested_epoch)</code> is the execution-side C++ function that exposes validator-set data to consensus. It is the one formal bridge where the consensus world asks the execution world “who are the validators for this epoch?” and gets back a concrete set. The current implementation is stricter than first readers usually expect: requesting the current epoch returns the current admissible view; requesting the next epoch only works during the delay-period window; and requesting an older or too-far-future epoch returns <code>nullopt</code>.</p>
+<p>That means the bridge is intentionally not “read any epoch you want whenever you want.” It is “read the current or next admissible consensus-facing validator data at the right block boundary.” This is one of the biggest “trust the code, not your first intuition” places in the whole client.</p>
+<h2 id="27-a-full-boundary-block-example">2.7 A Full Boundary-Block Example<a class="heading-anchor" aria-label="Link to this section" href="#27-a-full-boundary-block-example">#</a></h2>
+<p>Suppose <code>epoch_length = 4</code>, execution delay around the staking contract creates a boundary-delay window, blocks <code>0</code>, <code>1</code>, <code>2</code>, and <code>3</code> belong to epoch <code>1</code>, and block <code>3</code> finalizes. Then the faithful story is:</p>
+<ol>
+<li>block <code>3</code> is still in epoch <code>1</code></li>
+<li>block <code>3</code> locks epoch <code>2</code></li>
+<li>consensus now knows which future epoch number it is preparing for</li>
+<li>if staking activation is live, execution-backed validator data for epoch <code>2</code> becomes the next thing consensus wants to read</li>
+<li>that read is only admissible in the correct window</li>
+<li><code>EpochManager</code> schedules the round at which epoch <code>2</code> actually becomes active</li>
+<li>only when that round arrives does epoch <code>2</code> become the live validator set</li>
+</ol>
+<p>This is more faithful than the shortcut “epochs change at block boundaries.” They do not. Boundary blocks lock the next epoch; activation happens later in round-space.</p>
+<h2 id="28-the-most-useful-read_valset-table">2.8 The Most Useful <code>read_valset(...)</code> Table<a class="heading-anchor" aria-label="Link to this section" href="#28-the-most-useful-read_valset-table">#</a></h2>
+<p>The execution-side tests make the behavior especially clear:</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Situation</th><th>Request current epoch</th><th>Request next epoch</th></tr></thead><tbody><tr><td>before boundary delay window</td><td>current epoch reads the normal current consensus-facing view</td><td>rejected</td></tr><tr><td>during boundary delay window</td><td>current epoch reads the frozen snapshot-style current view</td><td>next epoch reads the prepared consensus-facing next view</td></tr></tbody></table>
+<p>That table is one of the most useful validator-set facts in the whole codebase. It explains why consensus-side validator updates need both the correct block number and the correct epoch context.</p>
+<h2 id="29-epochmanager-turns-block-events-into-round-activation">2.9 <code>EpochManager</code> Turns Block Events Into Round Activation<a class="heading-anchor" aria-label="Link to this section" href="#29-epochmanager-turns-block-events-into-round-activation">#</a></h2>
+<p><code>EpochManager</code> is the bridge between block events and round activation. At a reader level, it owns three ideas:</p>
+<ul>
+<li><code>epoch_length</code>: how many sequence numbers make up an epoch interval</li>
+<li><code>epoch_start_delay</code>: how many rounds after the boundary the next epoch activates</li>
+<li><code>epoch_starts</code>: the concrete schedule from epoch number to start round</li>
+</ul>
+<p>This is the type that turns “block <code>B</code> locked epoch <code>E + 1</code>” into “epoch <code>E + 1</code> becomes active at round <code>R</code>.” That translation is the reason proposal and timeout handlers later ask “what epoch is active at this round?” instead of “what sequence number are we near?“</p>
+<h2 id="210-the-lock---read---schedule---activate-lifecycle">2.10 The Lock -> Read -> Schedule -> Activate Lifecycle<a class="heading-anchor" aria-label="Link to this section" href="#210-the-lock---read---schedule---activate-lifecycle">#</a></h2>
+<p>This is the core lifecycle of epochs in current code.</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="mermaid"><code><span class="line"><span style="color:#E1E4E8">flowchart LR</span></span>
+<span class="line"><span style="color:#E1E4E8">    Boundary["finalized boundary block"] --> Lock["lock epoch E+1"]</span></span>
+<span class="line"><span style="color:#E1E4E8">    Lock --> Read["load validator data for E+1"]</span></span>
+<span class="line"><span style="color:#E1E4E8">    Read --> Schedule["schedule start round for E+1"]</span></span>
+<span class="line"><span style="color:#E1E4E8">    Schedule --> Activate["pacemaker reaches scheduled round"]</span></span>
+<span class="line"><span style="color:#E1E4E8">    Activate --> Live["epoch E+1 becomes active"]</span></span></code></pre>
+<p>Each step solves a different problem:</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Step</th><th>What becomes true</th></tr></thead><tbody><tr><td>lock</td><td>the next epoch’s validator data is determined</td></tr><tr><td>read</td><td>the node has the next validator set and certificate mapping in memory</td></tr><tr><td>schedule</td><td>the exact activation round is known</td></tr><tr><td>activate</td><td>consensus starts using the new set</td></tr></tbody></table>
+<p>This is why Monad needs both block-space reasoning and round-space reasoning.</p>
+<h2 id="211-leader-election-in-current-code">2.11 Leader Election In Current Code<a class="heading-anchor" aria-label="Link to this section" href="#211-leader-election-in-current-code">#</a></h2>
+<p>Every round needs an expected proposer. Consensus only wants a deterministic answer to one question: for this round and this validator set, who should lead? Determinism is the non-negotiable property. If honest nodes derive different leaders from the same inputs, the rest of the protocol falls apart immediately.</p>
+<h2 id="212-why-weightedroundrobin-does-not-look-like-classical-round-robin">2.12 Why <code>WeightedRoundRobin</code> Does Not Look Like Classical Round Robin<a class="heading-anchor" aria-label="Link to this section" href="#212-why-weightedroundrobin-does-not-look-like-classical-round-robin">#</a></h2>
+<p>The production-sounding name can mislead readers. The current implementation is not a literal circular list with validators repeated by stake. In the checked-out code, <code>WeightedRoundRobin</code> does this:</p>
+<ol>
+<li>seed <code>ChaCha20Rng</code> — a cryptographically-seeded pseudo-random number generator based on the ChaCha20 stream cipher, which means the same seed always produces the same output sequence — from the round number</li>
+<li>sample a value in <code>[0, total_stake)</code></li>
+<li>walk cumulative stake bounds</li>
+<li>choose the validator whose stake interval covers the sampled value</li>
+</ol>
+<p>So the current implementation is best described as deterministic stake-weighted sampling keyed by round, not naive cyclic round robin. The historical name stays because the job is still “stake-weighted repeated leader selection over rounds” — the modern implementation just does that with deterministic sampling rather than a crude repeated-list schedule.</p>
+<h2 id="213-where-leader-election-gets-checked">2.13 Where Leader Election Gets Checked<a class="heading-anchor" aria-label="Link to this section" href="#213-where-leader-election-gets-checked">#</a></h2>
+<p>Leader election is not only used when the local node decides to propose. It is also used to validate whether an incoming proposal author matches the expected leader for <code>proposal_round</code>, whether the block author matches the expected leader for <code>block_round</code>, which node should receive point-to-point votes, and whether the local node is allowed to emit a proposal at all.</p>
+<p>That last point matters: leader election is both a receiving-side validation rule and a local self-discipline rule.</p>
+<h2 id="214-two-kinds-of-determinism">2.14 Two Kinds Of Determinism<a class="heading-anchor" aria-label="Link to this section" href="#214-two-kinds-of-determinism">#</a></h2>
+<p>This chapter is also a good place to separate two ideas that later chapters rely on. Validator selection must be globally deterministic, while proposal contents do not need to be globally identical on every node. Leader election belongs in the first bucket; txpool proposal construction belongs in the second. That distinction becomes important in Chapter 9.</p>
+<h2 id="215-architecture-current-code-current-caveat">2.15 Architecture, Current Code, Current Caveat<a class="heading-anchor" aria-label="Link to this section" href="#215-architecture-current-code-current-caveat">#</a></h2>
+<blockquote>
+<p><strong>Architecture</strong>
+Epoch changes are multi-step: lock next epoch, load validator data, schedule the start round, then activate it.</p>
+</blockquote>
+<blockquote>
+<p><strong>Current code</strong>
+After staking activation, validator data comes from execution-backed staking state through a dedicated <code>read_valset(...)</code> path with strict epoch admissibility.</p>
+</blockquote>
+<blockquote>
+<p><strong>Current caveat</strong>
+The validator-set recheck on live rejoin is real, but the checked-out code still carries a TODO around which sequence number should be used for that recheck path. Chapter 5 comes back to that.</p>
+</blockquote>
+<h2 id="open-these-files-first">Open These Files First<a class="heading-anchor" aria-label="Link to this section" href="#open-these-files-first">#</a></h2>
+<ul>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-validator/src/validator_set.rs"><code>monad-validator/src/validator_set.rs</code></a>: membership, total stake, threshold checks</li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-validator/src/weighted_round_robin.rs"><code>monad-validator/src/weighted_round_robin.rs</code></a>: current leader-election implementation</li>
+<li><a href="https://github.com/category-labs/monad/blob/613698c24cec49da31ae7d383307916876265070/category/execution/monad/staking/read_valset.cpp"><code>category/execution/monad/staking/read_valset.cpp</code></a>: narrow execution-backed validator-set bridge</li>
+</ul>
+<h2 id="then-open-these">Then Open These<a class="heading-anchor" aria-label="Link to this section" href="#then-open-these">#</a></h2>
+<ul>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-updaters/src/triedb_val_set.rs"><code>monad-updaters/src/triedb_val_set.rs</code></a>: validator-set update flow from triedb-side reads</li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-chain-config/src/lib.rs"><code>monad-chain-config/src/lib.rs</code></a>: epoch length, delays, and activation parameters</li>
+<li><a href="https://github.com/category-labs/monad/blob/613698c24cec49da31ae7d383307916876265070/category/execution/monad/staking/test_read_valset.cpp"><code>category/execution/monad/staking/test_read_valset.cpp</code></a>: before-boundary and during-boundary admissibility behavior</li>
+</ul>
+<h2 id="then-keep-these-reference-tables-nearby">Then Keep These Reference Tables Nearby<a class="heading-anchor" aria-label="Link to this section" href="#then-keep-these-reference-tables-nearby">#</a></h2>
+<ul>
+<li><a href="/monad-client-book/16-glossary-timelines-and-reading-maps#clocks-and-identifiers-cheat-sheet">Clocks And Identifiers Cheat Sheet</a></li>
+<li><a href="/monad-client-book/16-glossary-timelines-and-reading-maps#the-canonical-delayed-execution-timeline">Canonical Delayed-Execution Timeline</a></li>
+</ul>
+<h2 id="what-to-remember">What To Remember<a class="heading-anchor" aria-label="Link to this section" href="#what-to-remember">#</a></h2>
+<ul>
+<li>Validator sets are stake-weighted maps with strong creation invariants.</li>
+<li>Validator identity and certificate-verification keys are related but distinct roles.</li>
+<li>A finalized boundary block locks the next epoch; it does not activate it immediately.</li>
+<li><code>read_valset(...)</code> is deliberately narrow and epoch-admissibility constrained.</li>
+<li><code>EpochManager</code> schedules epoch activation in round-space.</li>
+<li>The current leader-election implementation is deterministic stake-weighted sampling keyed by round.</li>
+</ul>
+<p>The next chapter turns validators and leaders into actual protocol objects: votes, certificates, blocks, tips, timeout certificates, and fresh-proposal proofs.</p>  </article> <nav class="chapter-nav" aria-label="Chapter navigation"><div class="chapter-nav-item"><a href="/monad-client-book/01-foundation-types-and-crypto/"><span class="chapter-nav-label">Previous</span>
+← Chapter 1: Foundation — Types and Cryptography</a></div><div class="chapter-nav-item chapter-nav-item-next"><a href="/monad-client-book/03-consensus-data-structures/"><span class="chapter-nav-label">Next</span>Chapter 3: Consensus Data Structures →
+</a></div></nav> </main> <aside class="chapter-tools"> <section class="tools-panel" aria-label="Table of contents"> <h2>On this page</h2> <ul class="toc-list"> <li> <a class="toc-link depth-2" href="#why-this-chapter-matters"> Why This Chapter Matters </a> </li><li> <a class="toc-link depth-2" href="#21-what-consensus-actually-needs-from-a-validator-set"> 2.1 What Consensus Actually Needs From A Validator Set </a> </li><li> <a class="toc-link depth-2" href="#22-creation-invariants"> 2.2 Creation Invariants </a> </li><li> <a class="toc-link depth-2" href="#23-identity-versus-certificate-key-again"> 2.3 Identity Versus Certificate Key, Again </a> </li><li> <a class="toc-link depth-2" href="#24-before-staking-activation-versus-after"> 2.4 Before Staking Activation Versus After </a> </li><li> <a class="toc-link depth-3" href="#before-staking-activation"> Before Staking Activation </a> </li><li> <a class="toc-link depth-3" href="#after-staking-activation"> After Staking Activation </a> </li><li> <a class="toc-link depth-2" href="#25-the-three-important-validator-views-on-the-execution-side"> 2.5 The Three Important Validator Views On The Execution Side </a> </li><li> <a class="toc-link depth-2" href="#26-read_valset-is-deliberately-narrow"> 2.6 read_valset(...) Is Deliberately Narrow </a> </li><li> <a class="toc-link depth-2" href="#27-a-full-boundary-block-example"> 2.7 A Full Boundary-Block Example </a> </li><li> <a class="toc-link depth-2" href="#28-the-most-useful-read_valset-table"> 2.8 The Most Useful read_valset(...) Table </a> </li><li> <a class="toc-link depth-2" href="#29-epochmanager-turns-block-events-into-round-activation"> 2.9 EpochManager Turns Block Events Into Round Activation </a> </li><li> <a class="toc-link depth-2" href="#210-the-lock---read---schedule---activate-lifecycle"> 2.10 The Lock -&gt; Read -&gt; Schedule -&gt; Activate Lifecycle </a> </li><li> <a class="toc-link depth-2" href="#211-leader-election-in-current-code"> 2.11 Leader Election In Current Code </a> </li><li> <a class="toc-link depth-2" href="#212-why-weightedroundrobin-does-not-look-like-classical-round-robin"> 2.12 Why WeightedRoundRobin Does Not Look Like Classical Round Robin </a> </li><li> <a class="toc-link depth-2" href="#213-where-leader-election-gets-checked"> 2.13 Where Leader Election Gets Checked </a> </li><li> <a class="toc-link depth-2" href="#214-two-kinds-of-determinism"> 2.14 Two Kinds Of Determinism </a> </li><li> <a class="toc-link depth-2" href="#215-architecture-current-code-current-caveat"> 2.15 Architecture, Current Code, Current Caveat </a> </li><li> <a class="toc-link depth-2" href="#open-these-files-first"> Open These Files First </a> </li><li> <a class="toc-link depth-2" href="#then-open-these"> Then Open These </a> </li><li> <a class="toc-link depth-2" href="#then-keep-these-reference-tables-nearby"> Then Keep These Reference Tables Nearby </a> </li><li> <a class="toc-link depth-2" href="#what-to-remember"> What To Remember </a> </li> </ul> </section> </aside> </div> <div class="mermaid-modal" data-mermaid-modal hidden role="dialog" aria-modal="true" aria-labelledby="mermaid-modal-title"> <div class="mermaid-modal-shell"> <div class="mermaid-modal-toolbar"> <p class="mermaid-modal-title" id="mermaid-modal-title">Diagram</p> <div class="mermaid-modal-actions"> <button type="button" class="mermaid-modal-action" data-mermaid-fit>
+Fit
+</button> <button type="button" class="mermaid-modal-action" data-mermaid-reset>
+Reset
+</button> <button type="button" class="mermaid-modal-action" data-mermaid-close aria-label="Close expanded diagram">
+Close
+</button> </div> </div> <div class="mermaid-modal-stage"> <div class="mermaid-modal-canvas" data-mermaid-canvas></div> </div> </div> </div> <script type="module" src="/monad-client-book/_astro/BookLayout.astro_astro_type_script_index_0_lang.Cmw0jMFF.js"></script> </body> </html>

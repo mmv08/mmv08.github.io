@@ -1,0 +1,446 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="generator" content="Astro v6.1.9"><title>Appendix: Glossary, Timelines, and Reading Maps</title><meta property="og:title" content="Appendix: Glossary, Timelines, and Reading Maps"><meta property="og:image" content="https://mmv08.github.io/monad-client-book/og-image.png"><link rel="stylesheet" href="/monad-client-book/_astro/book.np3A6oR_.css"></head> <body data-has-toc="true"> <button class="menu-toggle" id="menuToggle" aria-label="Toggle menu">☰</button> <div class="page "> <aside class="sidebar" id="sidebar"> <p class="sidebar-title"><a href="/monad-client-book/">Monad Client Book</a></p> <nav> <ul> <li> <a href="/monad-client-book/00-introduction/" class> The Monad Client: A Bottom-Up Code Walkthrough </a> </li><li> <a href="/monad-client-book/01-foundation-types-and-crypto/" class> Chapter 1: Foundation — Types and Cryptography </a> </li><li> <a href="/monad-client-book/02-validators-epochs-and-leader-election/" class> Chapter 2: Validators, Epochs, and Leader Election </a> </li><li> <a href="/monad-client-book/03-consensus-data-structures/" class> Chapter 3: Consensus Data Structures </a> </li><li> <a href="/monad-client-book/04-the-consensus-protocol/" class> Chapter 4: The Consensus Protocol </a> </li><li> <a href="/monad-client-book/05-chain-config-forkpoints-and-sync/" class> Chapter 5: Chain Config, Forkpoints, Restart, and Sync </a> </li><li> <a href="/monad-client-book/06-execution-and-evm/" class> Chapter 6: Execution Boundary and Process Architecture </a> </li><li> <a href="/monad-client-book/07-execution-data-model-and-state-transition/" class> Chapter 7: Execution Data Model and State Transition </a> </li><li> <a href="/monad-client-book/08-execution-services-triedb-events-and-hosted-apis/" class> Chapter 8: Execution Services — Triedb, Event Rings, and Hosted APIs </a> </li><li> <a href="/monad-client-book/09-transaction-pool-and-fee-market/" class> Chapter 9: Transaction Pool and Fee Market </a> </li><li> <a href="/monad-client-book/10-networking-and-p2p/" class> Chapter 10: Networking and Peer-to-Peer Communication </a> </li><li> <a href="/monad-client-book/11-storage-and-state/" class> Chapter 11: Storage and State </a> </li><li> <a href="/monad-client-book/12-node-assembly-and-rpc/" class> Chapter 12: Node Assembly and RPC </a> </li><li> <a href="/monad-client-book/13-failure-modes-and-defenses/" class> Chapter 13: Failure Modes and Defenses </a> </li><li> <a href="/monad-client-book/14-testing-and-simulation/" class> Chapter 14: Testing and Simulation </a> </li><li> <a href="/monad-client-book/15-how-monad-differs-from-ethereum/" class> Chapter 15: How Monad Differs From Ethereum </a> </li><li> <a href="/monad-client-book/16-glossary-timelines-and-reading-maps/" class="active"> Appendix: Glossary, Timelines, and Reading Maps </a> </li> </ul> </nav> </aside> <main class="main"> <header class="page-header"> <h1>Appendix: Glossary, Timelines, and Reading Maps</h1> <div class="source-meta"> <span class="source-path">monad-client-book/16-glossary-timelines-and-reading-maps.md</span> <a class="source-link" href="https://github.com/mmv08/category-labs-notes/blob/main/monad-client-book/16-glossary-timelines-and-reading-maps.md" target="_blank" rel="noreferrer">
+View source →
+</a> </div> </header> <article class="book-content">  <p>This appendix is the compact reference companion to the main chapters.</p>
+<p>Use it when you need:</p>
+<ul>
+<li>the one delayed-execution timeline the whole book assumes</li>
+<li>a quick refresher on clocks, IDs, and freshness words</li>
+<li>a global glossary</li>
+<li>function-level code navigation maps</li>
+</ul>
+<h2 id="why-this-appendix-exists">Why This Appendix Exists<a class="heading-anchor" aria-label="Link to this section" href="#why-this-appendix-exists">#</a></h2>
+<p>The main chapters teach the system in order.</p>
+<p>That is good for first understanding.
+It is less good when you later want to answer a narrow question such as:</p>
+<ul>
+<li>what exactly is the difference between <code>block_round</code> and <code>proposal_round</code>?</li>
+<li>which surface answers <code>eth_getBalance</code>?</li>
+<li>where does sync decide it is safe to go live?</li>
+<li>which functions should I open first for proposal handling?</li>
+</ul>
+<p>This appendix is the fast answer layer.</p>
+<p>Source links in this appendix are pinned to the reviewed <code>monad-bft</code> and <code>monad</code> commits for this edition.
+The local checkouts are still authoritative if anything ever drifts.</p>
+<h2 id="the-canonical-delayed-execution-timeline">The Canonical Delayed-Execution Timeline<a class="heading-anchor" aria-label="Link to this section" href="#the-canonical-delayed-execution-timeline">#</a></h2>
+<p>This is the single most important timeline in the whole book.</p>
+<p>The current <code>monad-node</code> wiring uses:</p>
+<ul>
+<li><code>EXECUTION_DELAY = 3</code></li>
+</ul>
+<p>The exact mechanics are spread across consensus, execution, txpool, and sync code.
+This table is the compact version to keep in your head.</p>
+<h3 id="high-level-picture">High-Level Picture<a class="heading-anchor" aria-label="Link to this section" href="#high-level-picture">#</a></h3>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Ordered block</th><th>What the block means immediately</th><th>What later blocks do with it</th></tr></thead><tbody><tr><td><code>N</code></td><td>consensus orders the block</td><td>execution for <code>N</code> completes later</td></tr><tr><td><code>N+1</code></td><td>chain ordering advances again</td><td>execution is still catching up</td></tr><tr><td><code>N+2</code></td><td>validators may still reason over a lagged execution view</td><td>stale-state safety rules still matter</td></tr><tr><td><code>N+3</code></td><td>delayed results for older work such as <code>N</code> can now be carried and checked</td><td>execution validates those delayed results against canonical earlier block history</td></tr></tbody></table>
+<h3 id="the-same-picture-in-system-terms">The Same Picture In System Terms<a class="heading-anchor" aria-label="Link to this section" href="#the-same-picture-in-system-terms">#</a></h3>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Time</th><th>Consensus side</th><th>Execution side</th><th>Why it matters</th></tr></thead><tbody><tr><td>block <code>N</code> is ordered</td><td><code>SeqNum(N)</code> exists now</td><td>execution of <code>N</code> is not yet the newest visible result</td><td>ordering and execution are intentionally split</td></tr><tr><td>blocks <code>N+1</code> and <code>N+2</code> are ordered</td><td>more consensus history accumulates</td><td>ordering still sees a lagged execution state</td><td>reserve balance and coherency checks matter</td></tr><tr><td>block <code>N+3</code> is ordered</td><td>a later header can carry delayed results for older work</td><td>execution can now validate delayed results for <code>N</code> against canonical block history</td><td>delayed results are not free-floating blobs</td></tr></tbody></table>
+<h3 id="what-this-timeline-explains">What This Timeline Explains<a class="heading-anchor" aria-label="Link to this section" href="#what-this-timeline-explains">#</a></h3>
+<p>If this table clicks, these later design choices stop feeling arbitrary:</p>
+<ul>
+<li>a block can be valid but not yet coherent</li>
+<li>block headers carry <code>execution_inputs</code></li>
+<li>later block headers also carry <code>delayed_execution_results</code></li>
+<li>state sync targets a delayed execution anchor rather than an arbitrary tip</li>
+<li>reserve balance exists because ordering sees stale state</li>
+<li>“latest ordered block” and “latest executed state” are different questions</li>
+</ul>
+<h2 id="clocks-and-identifiers-cheat-sheet">Clocks And Identifiers Cheat Sheet<a class="heading-anchor" aria-label="Link to this section" href="#clocks-and-identifiers-cheat-sheet">#</a></h2>
+<p>This is the smallest reference table that prevents the most confusion.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Name</th><th>What it means</th><th>Do not confuse it with</th></tr></thead><tbody><tr><td><code>Round</code></td><td>one consensus attempt</td><td>block height</td></tr><tr><td><code>block_round</code></td><td>round in which the block was originally authored</td><td>current proposal round</td></tr><tr><td><code>proposal_round</code></td><td>round in which this proposal message is being sent</td><td>block height</td></tr><tr><td><code>SeqNum</code></td><td>ordered consensus block height</td><td>round</td></tr><tr><td><code>Epoch</code></td><td>validator-set era</td><td>block height only</td></tr><tr><td>execution block number</td><td>execution-side numeric block height view</td><td>proposal round</td></tr><tr><td><code>BlockId</code></td><td>typed identity of a consensus block header</td><td>body ID or arbitrary hash</td></tr><tr><td><code>block_body_id</code></td><td>hash identity of the block body</td><td>header block ID</td></tr></tbody></table>
+<h2 id="freshness-and-read-surfaces-cheat-sheet">Freshness And Read Surfaces Cheat Sheet<a class="heading-anchor" aria-label="Link to this section" href="#freshness-and-read-surfaces-cheat-sheet">#</a></h2>
+<p>The question “what is latest?” is underspecified in Monad.</p>
+<p>Ask two questions instead:</p>
+<ul>
+<li>latest according to which subsystem?</li>
+<li>latest from which storage or live-output surface?</li>
+</ul>
+<h3 id="freshness-words">Freshness Words<a class="heading-anchor" aria-label="Link to this section" href="#freshness-words">#</a></h3>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Word</th><th>Short meaning</th><th>Typical place it appears</th></tr></thead><tbody><tr><td><code>proposed</code></td><td>newest observed head</td><td>ledger head marker, triedb metadata, event stream, RPC</td></tr><tr><td><code>voted</code></td><td>stronger intermediate head</td><td>ledger head marker, triedb metadata, event stream</td></tr><tr><td><code>finalized</code></td><td>durable committed anchor</td><td>ledger head marker, triedb metadata, event stream, restart logic</td></tr></tbody></table>
+<h3 id="surfaces">Surfaces<a class="heading-anchor" aria-label="Link to this section" href="#surfaces">#</a></h3>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Surface</th><th>What it is good at</th><th>What it is not</th></tr></thead><tbody><tr><td>ledger</td><td>durable consensus block history</td><td>recent execution state</td></tr><tr><td>triedb</td><td>retained recent execution state and recent block-oriented execution data</td><td>infinite historical state</td></tr><tr><td>event ring</td><td>freshest live execution events</td><td>durable replayable history</td></tr><tr><td>WAL</td><td>replaying node inputs</td><td>user-facing query service</td></tr><tr><td>archive</td><td>older blocks, receipts, traces, indexes</td><td>general historical world-state reconstruction</td></tr></tbody></table>
+<h3 id="one-practical-rpc-matrix">One Practical RPC Matrix<a class="heading-anchor" aria-label="Link to this section" href="#one-practical-rpc-matrix">#</a></h3>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Query</th><th>Main path today</th></tr></thead><tbody><tr><td><code>eth_blockNumber</code></td><td>triedb metadata</td></tr><tr><td><code>eth_getBalance</code></td><td>triedb</td></tr><tr><td><code>eth_getCode</code></td><td>triedb</td></tr><tr><td><code>eth_getTransactionReceipt</code></td><td>recent buffer -> triedb -> archive</td></tr><tr><td><code>eth_getTransactionByHash</code></td><td>recent buffer -> triedb -> archive</td></tr><tr><td><code>eth_call</code></td><td>triedb-backed block context -> hosted execution</td></tr><tr><td>standard WS <code>newHeads</code> / <code>logs</code></td><td>event ring -> WebSocket handler, filtered to proposed commit state</td></tr><tr><td>Monad WS <code>monadNewHeads</code> / <code>monadLogs</code></td><td>event ring -> WebSocket handler, with commit state preserved</td></tr></tbody></table>
+<h2 id="global-glossary">Global Glossary<a class="heading-anchor" aria-label="Link to this section" href="#global-glossary">#</a></h2>
+<h3 id="consensus-terms">Consensus Terms<a class="heading-anchor" aria-label="Link to this section" href="#consensus-terms">#</a></h3>
+<p><strong><code>round</code></strong><br>
+One consensus attempt. A round can end with a QC or with a timeout path.</p>
+<p><strong><code>seq_num</code></strong><br>
+The consensus-side block height.</p>
+<p><strong><code>epoch</code></strong><br>
+A validator-set era. Epoch activation is scheduled in round-space, not by block height alone.</p>
+<p><strong><code>block_round</code></strong><br>
+The round in which a block was first authored. Stored as a field on the block header itself.</p>
+<p><strong><code>proposal_round</code></strong><br>
+The round in which the current proposal message is being sent. Stored as a field on the proposal message, not on the header. On the happy path <code>proposal_round == block_round</code>; on recovery paths (reproposals) they can diverge.</p>
+<p><strong>QC</strong><br>
+<code>QuorumCertificate</code>: threshold proof that enough stake signed the same vote statement.</p>
+<p><strong>TC</strong><br>
+<code>TimeoutCertificate</code>: threshold proof that enough stake timed out the same round, together with recovery context.</p>
+<p><strong>NEC</strong><br>
+<code>NoEndorsementCertificate</code>: threshold proof that enough stake refused endorsement of the same recovered tip.</p>
+<p><strong>FPC</strong><br>
+<code>FreshProposalCertificate</code>: fresh-proposal authority. In current code this is an enum that can carry <code>Nec(...)</code> or <code>NoTip(...)</code>.</p>
+<p><strong>high certificate</strong><br>
+The current best round-ending certificate held by the pacemaker. It can be QC-backed or TC-backed.</p>
+<p><strong>high extend</strong><br>
+The best extension point carried by a timeout certificate. This is what recovery logic later tries to reuse or replace.</p>
+<p><strong>committable</strong><br>
+A block that satisfies the protocol’s certified parent-child relationship for commit. This is not identical to “coherent.”</p>
+<h3 id="validity-terms">Validity Terms<a class="heading-anchor" aria-label="Link to this section" href="#validity-terms">#</a></h3>
+<p><strong>valid</strong><br>
+Structurally and cryptographically acceptable.</p>
+<p><strong>coherent</strong><br>
+Valid and consistent with the chain and delayed-execution state context currently visible to the node.</p>
+<p><strong>missing ancestor</strong><br>
+The block may be fine, but local ancestry is incomplete.</p>
+<p><strong>lagging state</strong><br>
+The node’s execution-side state is too far behind to safely participate as live.</p>
+<h3 id="restart-and-sync-terms">Restart And Sync Terms<a class="heading-anchor" aria-label="Link to this section" href="#restart-and-sync-terms">#</a></h3>
+<p><strong>forkpoint</strong><br>
+The restart anchor: committed root plus high certificate plus nearby validator context.</p>
+<p><strong>block sync</strong><br>
+Fetch missing consensus blocks and ancestry.</p>
+<p><strong>state sync</strong><br>
+Fetch recent execution state so the node does not replay everything from genesis.</p>
+<p><strong>delayed anchor</strong><br>
+The execution-side target around <code>root_seq_num - execution_delay</code> used in sync readiness checks.</p>
+<h3 id="storage-and-read-surface-terms">Storage And Read-Surface Terms<a class="heading-anchor" aria-label="Link to this section" href="#storage-and-read-surface-terms">#</a></h3>
+<p><strong>triedb / MonadDB</strong><br>
+The retained recent execution database.</p>
+<p><strong>event ring</strong><br>
+The freshest execution-event stream. Good for live subscriptions, not for durable replay.</p>
+<p><strong>archive</strong><br>
+Older block-oriented history such as old blocks, receipts, traces, and indexes. Not a general historical world-state engine.</p>
+<p><strong>WAL</strong><br>
+Write-ahead log of node input events for replay and debugging.</p>
+<h3 id="networking-terms">Networking Terms<a class="heading-anchor" aria-label="Link to this section" href="#networking-terms">#</a></h3>
+<p><strong>WireAuth</strong><br>
+Authenticated UDP session layer with replay filtering and cookie-based anti-spoofing defenses.</p>
+<p><strong>LeanUDP</strong><br>
+Direct-message fragmentation and reassembly over UDP.</p>
+<p><strong>EMA</strong><br>
+Exponential moving average. Used in peer-scoring logic to smooth noisy recent behavior over time.</p>
+<h2 id="recovery-objects-at-a-glance">Recovery Objects At A Glance<a class="heading-anchor" aria-label="Link to this section" href="#recovery-objects-at-a-glance">#</a></h2>
+<p>This is the smallest table that makes the recovery path readable.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Object</th><th>What it means</th><th>What it authorizes next</th></tr></thead><tbody><tr><td>QC</td><td>enough stake voted for one block in one round</td><td>normal round advance and commit logic</td></tr><tr><td>TC</td><td>enough stake timed out one round, with best known extension context</td><td>recovery logic, possible reproposal</td></tr><tr><td><code>RoundRecoveryMessage</code></td><td>ask the current leader to judge a recovered tip</td><td>reuse or refusal path</td></tr><tr><td><code>NoEndorsementMessage</code></td><td>one validator refuses endorsement of a recovered tip</td><td>possible NEC</td></tr><tr><td>NEC</td><td>enough stake refused the same recovered tip</td><td>one kind of fresh proposal authority</td></tr><tr><td><code>NoTipCertificate</code></td><td>enough stake agrees there is no reusable tip path worth endorsing</td><td>another kind of fresh proposal authority</td></tr><tr><td><code>FreshProposalCertificate</code></td><td>fresh proposal is allowed</td><td>leader may build a truly fresh proposal</td></tr></tbody></table>
+<h2 id="function-level-reading-maps">Function-Level Reading Maps<a class="heading-anchor" aria-label="Link to this section" href="#function-level-reading-maps">#</a></h2>
+<p>These are not the only important functions.
+They are the best first functions to open if you want the book to line up with the code quickly.</p>
+<h3 id="consensus-protocol">Consensus Protocol<a class="heading-anchor" aria-label="Link to this section" href="#consensus-protocol">#</a></h3>
+<ul>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-consensus-state/src/lib.rs"><code>monad-consensus-state/src/lib.rs</code></a>: <code>handle_proposal_message</code>, <code>validate_block</code>, <code>process_tc</code>, <code>try_vote</code></li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-state/src/consensus.rs"><code>monad-state/src/consensus.rs</code></a>: prefiltering and message routing into consensus handlers</li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-consensus/src/pacemaker.rs"><code>monad-consensus/src/pacemaker.rs</code></a>: round advancement and high-certificate handling</li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-consensus/src/vote_state.rs"><code>monad-consensus/src/vote_state.rs</code></a>: vote aggregation and QC creation</li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-consensus/src/validation/safety.rs"><code>monad-consensus/src/validation/safety.rs</code></a>: honest-node self-defense rules</li>
+</ul>
+<h3 id="restart-and-sync">Restart And Sync<a class="heading-anchor" aria-label="Link to this section" href="#restart-and-sync">#</a></h3>
+<ul>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-state/src/lib.rs"><code>monad-state/src/lib.rs</code></a>: <code>maybe_start_consensus</code></li>
+<li>the same file: <code>DoneSync</code> handling and the live-transition path</li>
+<li>the same file: staking-backed validator-set recheck on rejoin</li>
+</ul>
+<h3 id="txpool">Txpool<a class="heading-anchor" aria-label="Link to this section" href="#txpool">#</a></h3>
+<ul>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-eth-txpool/src/pool/sequencer.rs"><code>monad-eth-txpool/src/pool/sequencer.rs</code></a>: sender-head heap, ordering, and <code>partial_shuffle</code></li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-eth-txpool/src/pool/mod.rs"><code>monad-eth-txpool/src/pool/mod.rs</code></a>: pool structure and validation flow</li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-eth-block-policy/src/lib.rs"><code>monad-eth-block-policy/src/lib.rs</code></a>: reserve-balance-aware and coherency-aware policy</li>
+</ul>
+<h3 id="execution">Execution<a class="heading-anchor" aria-label="Link to this section" href="#execution">#</a></h3>
+<ul>
+<li><a href="https://github.com/category-labs/monad/blob/613698c24cec49da31ae7d383307916876265070/cmd/monad/runloop_monad.cpp"><code>cmd/monad/runloop_monad.cpp</code></a>: execution daemon run loop, delayed-result validation, ledger ingestion</li>
+<li><a href="https://github.com/category-labs/monad/blob/613698c24cec49da31ae7d383307916876265070/category/execution/monad/validate_monad_block.cpp"><code>category/execution/monad/validate_monad_block.cpp</code></a>: static Monad block validation</li>
+<li><a href="https://github.com/category-labs/monad/blob/613698c24cec49da31ae7d383307916876265070/category/execution/monad/reserve_balance.cpp"><code>category/execution/monad/reserve_balance.cpp</code></a>: execution-side reserve-balance enforcement</li>
+<li><a href="https://github.com/category-labs/monad/blob/613698c24cec49da31ae7d383307916876265070/category/execution/monad/staking/read_valset.cpp"><code>category/execution/monad/staking/read_valset.cpp</code></a>: staking-backed validator-set reads</li>
+<li><a href="https://github.com/category-labs/monad/blob/613698c24cec49da31ae7d383307916876265070/category/rpc/monad_executor.cpp"><code>category/rpc/monad_executor.cpp</code></a>: hosted <code>eth_call</code></li>
+</ul>
+<h3 id="read-surfaces-and-rpc">Read Surfaces And RPC<a class="heading-anchor" aria-label="Link to this section" href="#read-surfaces-and-rpc">#</a></h3>
+<ul>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-rpc/src/data/mod.rs"><code>monad-rpc/src/data/mod.rs</code></a>: <code>DataProvider</code>, <code>get_latest_block_number</code>, recent/buffer/archive composition</li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-rpc/src/data/buffer.rs"><code>monad-rpc/src/data/buffer.rs</code></a>: <code>ExecEventsBuffer::insert</code></li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-triedb-utils/src/triedb_env.rs"><code>monad-triedb-utils/src/triedb_env.rs</code></a>: triedb metadata polling and broader RPC-facing adapter</li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-state-backend/src/thread.rs"><code>monad-state-backend/src/thread.rs</code></a>: narrow consensus-side triedb worker boundary</li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-rpc/src/websocket/handler.rs"><code>monad-rpc/src/websocket/handler.rs</code></a>: subscription filtering, gap handling, and commit-state exposure</li>
+</ul>
+<h3 id="storage">Storage<a class="heading-anchor" aria-label="Link to this section" href="#storage">#</a></h3>
+<ul>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/docs/storage_paths.md"><code>docs/storage_paths.md</code></a>: deeper storage companion note</li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-block-persist/src/lib.rs"><code>monad-block-persist/src/lib.rs</code></a>: body/header write order and atomic head-link updates</li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-ledger/src/lib.rs"><code>monad-ledger/src/lib.rs</code></a>: execution ledger wrapper and blocksync serving behavior</li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-wal/src/wal.rs"><code>monad-wal/src/wal.rs</code></a>: WAL record format and sync behavior</li>
+</ul>
+<h3 id="testing">Testing<a class="heading-anchor" aria-label="Link to this section" href="#testing">#</a></h3>
+<ul>
+<li><a href="https://github.com/category-labs/monad-bft/tree/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-mock-swarm"><code>monad-mock-swarm</code></a>: deterministic multi-node simulation</li>
+<li><a href="https://github.com/category-labs/monad-bft/tree/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-twins"><code>monad-twins</code></a>: adversarial twins and partition scenarios</li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-randomized-tests/src/main.rs"><code>monad-randomized-tests/src/main.rs</code></a>: seeded randomized schedules</li>
+<li><a href="https://github.com/category-labs/monad/tree/613698c24cec49da31ae7d383307916876265070/test/ethereum_test"><code>test/ethereum_test</code></a>: execution-side Ethereum fixture suites</li>
+<li><a href="https://github.com/category-labs/monad/blob/613698c24cec49da31ae7d383307916876265070/category/rpc/monad_executor_test.cpp"><code>category/rpc/monad_executor_test.cpp</code></a>: hosted execution semantics, gas behavior, and call-frame expectations</li>
+<li><a href="https://github.com/category-labs/monad/blob/613698c24cec49da31ae7d383307916876265070/scripts/test.sh"><code>scripts/test.sh</code></a>: execution-side test entrypoint</li>
+</ul>
+<h2 id="when-to-re-read-this-appendix">When To Re-Read This Appendix<a class="heading-anchor" aria-label="Link to this section" href="#when-to-re-read-this-appendix">#</a></h2>
+<p>Come back here when:</p>
+<ul>
+<li>Chapter 3 recovery objects start to blur together</li>
+<li>Chapter 5 sync uses the delayed anchor and you want the big picture again</li>
+<li>Chapter 8 or 12 makes you ask “latest according to which surface?”</li>
+<li>Chapter 9 makes you ask why txpool randomness is acceptable</li>
+<li>Chapter 15 makes you compare Monad gas and stale-state behavior to Ethereum</li>
+</ul>
+<p>The appendix is not meant to replace the main chapters.
+It is meant to keep the main chapters from falling out of your head between reads.</p>  </article> <nav class="chapter-nav" aria-label="Chapter navigation"><div class="chapter-nav-item"><a href="/monad-client-book/15-how-monad-differs-from-ethereum/"><span class="chapter-nav-label">Previous</span>
+← Chapter 15: How Monad Differs From Ethereum</a></div><div class="chapter-nav-item chapter-nav-item-next"></div></nav> </main> <aside class="chapter-tools"> <section class="tools-panel" aria-label="Table of contents"> <h2>On this page</h2> <ul class="toc-list"> <li> <a class="toc-link depth-2" href="#why-this-appendix-exists"> Why This Appendix Exists </a> </li><li> <a class="toc-link depth-2" href="#the-canonical-delayed-execution-timeline"> The Canonical Delayed-Execution Timeline </a> </li><li> <a class="toc-link depth-3" href="#high-level-picture"> High-Level Picture </a> </li><li> <a class="toc-link depth-3" href="#the-same-picture-in-system-terms"> The Same Picture In System Terms </a> </li><li> <a class="toc-link depth-3" href="#what-this-timeline-explains"> What This Timeline Explains </a> </li><li> <a class="toc-link depth-2" href="#clocks-and-identifiers-cheat-sheet"> Clocks And Identifiers Cheat Sheet </a> </li><li> <a class="toc-link depth-2" href="#freshness-and-read-surfaces-cheat-sheet"> Freshness And Read Surfaces Cheat Sheet </a> </li><li> <a class="toc-link depth-3" href="#freshness-words"> Freshness Words </a> </li><li> <a class="toc-link depth-3" href="#surfaces"> Surfaces </a> </li><li> <a class="toc-link depth-3" href="#one-practical-rpc-matrix"> One Practical RPC Matrix </a> </li><li> <a class="toc-link depth-2" href="#global-glossary"> Global Glossary </a> </li><li> <a class="toc-link depth-3" href="#consensus-terms"> Consensus Terms </a> </li><li> <a class="toc-link depth-3" href="#validity-terms"> Validity Terms </a> </li><li> <a class="toc-link depth-3" href="#restart-and-sync-terms"> Restart And Sync Terms </a> </li><li> <a class="toc-link depth-3" href="#storage-and-read-surface-terms"> Storage And Read-Surface Terms </a> </li><li> <a class="toc-link depth-3" href="#networking-terms"> Networking Terms </a> </li><li> <a class="toc-link depth-2" href="#recovery-objects-at-a-glance"> Recovery Objects At A Glance </a> </li><li> <a class="toc-link depth-2" href="#function-level-reading-maps"> Function-Level Reading Maps </a> </li><li> <a class="toc-link depth-3" href="#consensus-protocol"> Consensus Protocol </a> </li><li> <a class="toc-link depth-3" href="#restart-and-sync"> Restart And Sync </a> </li><li> <a class="toc-link depth-3" href="#txpool"> Txpool </a> </li><li> <a class="toc-link depth-3" href="#execution"> Execution </a> </li><li> <a class="toc-link depth-3" href="#read-surfaces-and-rpc"> Read Surfaces And RPC </a> </li><li> <a class="toc-link depth-3" href="#storage"> Storage </a> </li><li> <a class="toc-link depth-3" href="#testing"> Testing </a> </li><li> <a class="toc-link depth-2" href="#when-to-re-read-this-appendix"> When To Re-Read This Appendix </a> </li> </ul> </section> </aside> </div>  <script type="module" src="/monad-client-book/_astro/BookLayout.astro_astro_type_script_index_0_lang.Cmw0jMFF.js"></script> </body> </html>

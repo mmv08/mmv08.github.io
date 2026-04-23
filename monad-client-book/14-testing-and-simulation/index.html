@@ -1,0 +1,192 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="generator" content="Astro v6.1.9"><title>Chapter 14: Testing and Simulation</title><meta property="og:title" content="Chapter 14: Testing and Simulation"><meta property="og:image" content="https://mmv08.github.io/monad-client-book/og-image.png"><link rel="stylesheet" href="/monad-client-book/_astro/book.np3A6oR_.css"></head> <body data-has-toc="true"> <button class="menu-toggle" id="menuToggle" aria-label="Toggle menu">☰</button> <div class="page "> <aside class="sidebar" id="sidebar"> <p class="sidebar-title"><a href="/monad-client-book/">Monad Client Book</a></p> <nav> <ul> <li> <a href="/monad-client-book/00-introduction/" class> The Monad Client: A Bottom-Up Code Walkthrough </a> </li><li> <a href="/monad-client-book/01-foundation-types-and-crypto/" class> Chapter 1: Foundation — Types and Cryptography </a> </li><li> <a href="/monad-client-book/02-validators-epochs-and-leader-election/" class> Chapter 2: Validators, Epochs, and Leader Election </a> </li><li> <a href="/monad-client-book/03-consensus-data-structures/" class> Chapter 3: Consensus Data Structures </a> </li><li> <a href="/monad-client-book/04-the-consensus-protocol/" class> Chapter 4: The Consensus Protocol </a> </li><li> <a href="/monad-client-book/05-chain-config-forkpoints-and-sync/" class> Chapter 5: Chain Config, Forkpoints, Restart, and Sync </a> </li><li> <a href="/monad-client-book/06-execution-and-evm/" class> Chapter 6: Execution Boundary and Process Architecture </a> </li><li> <a href="/monad-client-book/07-execution-data-model-and-state-transition/" class> Chapter 7: Execution Data Model and State Transition </a> </li><li> <a href="/monad-client-book/08-execution-services-triedb-events-and-hosted-apis/" class> Chapter 8: Execution Services — Triedb, Event Rings, and Hosted APIs </a> </li><li> <a href="/monad-client-book/09-transaction-pool-and-fee-market/" class> Chapter 9: Transaction Pool and Fee Market </a> </li><li> <a href="/monad-client-book/10-networking-and-p2p/" class> Chapter 10: Networking and Peer-to-Peer Communication </a> </li><li> <a href="/monad-client-book/11-storage-and-state/" class> Chapter 11: Storage and State </a> </li><li> <a href="/monad-client-book/12-node-assembly-and-rpc/" class> Chapter 12: Node Assembly and RPC </a> </li><li> <a href="/monad-client-book/13-failure-modes-and-defenses/" class> Chapter 13: Failure Modes and Defenses </a> </li><li> <a href="/monad-client-book/14-testing-and-simulation/" class="active"> Chapter 14: Testing and Simulation </a> </li><li> <a href="/monad-client-book/15-how-monad-differs-from-ethereum/" class> Chapter 15: How Monad Differs From Ethereum </a> </li><li> <a href="/monad-client-book/16-glossary-timelines-and-reading-maps/" class> Appendix: Glossary, Timelines, and Reading Maps </a> </li> </ul> </nav> </aside> <main class="main"> <header class="page-header"> <h1>Chapter 14: Testing and Simulation</h1> <div class="source-meta"> <span class="source-path">monad-client-book/14-testing-and-simulation.md</span> <a class="source-link" href="https://github.com/mmv08/category-labs-notes/blob/main/monad-client-book/14-testing-and-simulation.md" target="_blank" rel="noreferrer">
+View source →
+</a> </div> </header> <article class="book-content">  <p>Monad is not one program. It is a system split across two repos and several runtime boundaries. So the testing story should never be summarized as “the tests passed.” That sentence hides the important question: which part of the system was pressured, and what kind of failure was that pressure designed to catch? This chapter explains the confidence model across both <code>monad-bft</code> and <code>monad</code>.</p>
+<h2 id="why-this-chapter-matters">Why This Chapter Matters<a class="heading-anchor" aria-label="Link to this section" href="#why-this-chapter-matters">#</a></h2>
+<p>If this book teaches architecture but not confidence, it leaves out half the story. A reader needs to know how the consensus side is pressured, how the execution side is pressured, where deterministic simulation stops and fixture-driven compatibility starts, what public CI definitely runs, and what exists mainly as local or targeted tooling. Once you know that, the codebase feels much more trustworthy.</p>
+<h2 id="141-there-is-no-one-perfect-test-layer">14.1 There Is No One Perfect Test Layer<a class="heading-anchor" aria-label="Link to this section" href="#141-there-is-no-one-perfect-test-layer">#</a></h2>
+<p>Monad uses a ladder of pressure, not one magic test framework. Across the two repos, the important layers are unit tests, property-style generated tests, deterministic multi-node simulation, adversarial twins scenarios, seeded randomized schedules, assembled local stacks, fixture-driven Ethereum compatibility suites, targeted C++ execution tests, VM-focused tests and fuzzing, benchmarks, and CI workflows that keep major layers visible.</p>
+<p>Three of those words deserve a quick inline definition. <em>CI</em> stands for continuous integration: an automated system (here, GitHub Actions) that runs tests and checks on every pull request and every merge so regressions are caught before humans have to notice. <em>Fuzzing</em> means feeding the code random or adversarial inputs and watching for crashes, panics, or invariant violations. A <em>fixture</em> is a pre-built input bundle (typically JSON) that drives a specific test scenario end-to-end without the test needing to construct the state from scratch.</p>
+<p>That is the right whole-system picture.</p>
+<h2 id="142-a-compact-verification-ladder">14.2 A Compact Verification Ladder<a class="heading-anchor" aria-label="Link to this section" href="#142-a-compact-verification-ladder">#</a></h2>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Layer</th><th>Main repo emphasis</th><th>What it is best at catching</th></tr></thead><tbody><tr><td>unit tests</td><td>both repos</td><td>small local logic bugs</td></tr><tr><td>property or generated tests</td><td>mostly <code>monad-bft</code>, some execution-adjacent surfaces</td><td>invariant violations across many inputs</td></tr><tr><td>deterministic simulation</td><td><code>monad-bft</code></td><td>safety and liveness mistakes across many nodes</td></tr><tr><td>adversarial simulation</td><td><code>monad-bft</code></td><td>equivocation, partitions, and ugly network schedules</td></tr><tr><td>seeded randomized runs</td><td><code>monad-bft</code></td><td>interleaving bugs missed by hand-written scenarios</td></tr><tr><td>fixture-driven EVM suites</td><td><code>monad</code></td><td>execution compatibility across known Ethereum forks</td></tr><tr><td>targeted execution C++ tests</td><td><code>monad</code></td><td>Monad-specific execution semantics and storage behavior</td></tr><tr><td>VM tests and fuzzing</td><td><code>monad</code></td><td>compiler, interpreter, and runtime engine correctness</td></tr><tr><td>benchmarks</td><td>both repos</td><td>performance regressions</td></tr><tr><td>CI workflows</td><td>both repos</td><td>keep broad layers visible on every change</td></tr></tbody></table>
+<p>That table is a better mental model than imagining one universal test command.</p>
+<h2 id="143-the-monad-bft-confidence-model-starts-with-ordinary-rust-tests">14.3 The <code>monad-bft</code> Confidence Model Starts With Ordinary Rust Tests<a class="heading-anchor" aria-label="Link to this section" href="#143-the-monad-bft-confidence-model-starts-with-ordinary-rust-tests">#</a></h2>
+<p>At the bottom, <code>monad-bft</code> still uses ordinary crate-level tests. This is where the repo catches things like serialization round-trips, signature and hashing behavior, queueing and scheduling rules, fee or policy math, and networking helper invariants. Property-style testing also shows up where generated variation buys real confidence, especially around smaller logic-heavy crates. This layer matters because it keeps small rules cheap to change.</p>
+<h2 id="144-monad-mock-swarm-is-the-core-consensus-simulator">14.4 <code>monad-mock-swarm</code> Is The Core Consensus Simulator<a class="heading-anchor" aria-label="Link to this section" href="#144-monad-mock-swarm-is-the-core-consensus-simulator">#</a></h2>
+<p><code>monad-mock-swarm</code> is the heart of the deterministic simulation story. It builds many in-memory nodes and advances them in virtual time. The important architectural point is that it still feels like the production design:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="text"><code><span class="line"><span>event source -> executor -> MonadState -> commands -> executor -> emitted messages</span></span></code></pre>
+<p>The environment is mocked; the protocol style is not. That makes it much more valuable than a toy model that only vaguely resembles the client.</p>
+<h3 id="what-it-is-good-for">What It Is Good For<a class="heading-anchor" aria-label="Link to this section" href="#what-it-is-good-for">#</a></h3>
+<p><code>monad-mock-swarm</code> is the right tool when you want to pressure safety under complex schedules, liveness under delays, state-machine behavior across multiple nodes, or invariants that only appear once several roles interact.</p>
+<h2 id="145-monad-twins-and-monad-randomized-tests-push-harder-on-bad-schedules">14.5 <code>monad-twins</code> And <code>monad-randomized-tests</code> Push Harder On Bad Schedules<a class="heading-anchor" aria-label="Link to this section" href="#145-monad-twins-and-monad-randomized-tests-push-harder-on-bad-schedules">#</a></h2>
+<p>Two more <code>monad-bft</code> surfaces matter a lot.</p>
+<h3 id="monad-twins"><code>monad-twins</code><a class="heading-anchor" aria-label="Link to this section" href="#monad-twins">#</a></h3>
+<p><code>monad-twins</code> is for adversarial cases where one logical validator identity effectively appears in several places at once. It is especially useful for equivocation-like scenarios, partitions, reconnection behavior, and proving that safety does not silently depend on an unrealistically clean network.</p>
+<h3 id="monad-randomized-tests"><code>monad-randomized-tests</code><a class="heading-anchor" aria-label="Link to this section" href="#monad-randomized-tests">#</a></h3>
+<p><code>monad-randomized-tests</code> uses a numeric seed and iterates over registered randomized cases. That is valuable because many consensus failures are not one obvious invariant bug — they are one unfortunate interleaving that a hand-written scenario never happened to cover. The binary also writes <code>tests_results.xml</code>, which makes seeded random runs easier to plug into automation when needed.</p>
+<h2 id="146-monad-testground-and-monad-debugger-sit-between-unit-tests-and-operations">14.6 <code>monad-testground</code> And <code>monad-debugger</code> Sit Between Unit Tests And Operations<a class="heading-anchor" aria-label="Link to this section" href="#146-monad-testground-and-monad-debugger-sit-between-unit-tests-and-operations">#</a></h2>
+<p><code>monad-testground</code> and <code>monad-debugger</code> are worth calling out separately because they sit in a middle layer.</p>
+<h3 id="monad-testground"><code>monad-testground</code><a class="heading-anchor" aria-label="Link to this section" href="#monad-testground">#</a></h3>
+<p>This gives you more of a system feel than a tiny unit test, but with less operational weight than a full deployment. It is useful when you want several assembled subsystems, reproducible coordination, and more realism than a narrow isolated test.</p>
+<h3 id="monad-debugger"><code>monad-debugger</code><a class="heading-anchor" aria-label="Link to this section" href="#monad-debugger">#</a></h3>
+<p><code>monad-debugger</code> is a browser-facing or WASM-facing simulation and visualization surface built on the same general simulator ideas. That continuity matters — it is not a second secret protocol implementation.</p>
+<h2 id="147-monad-bft-also-has-fuzzing-benchmarks-and-workflow-gates">14.7 <code>monad-bft</code> Also Has Fuzzing, Benchmarks, And Workflow Gates<a class="heading-anchor" aria-label="Link to this section" href="#147-monad-bft-also-has-fuzzing-benchmarks-and-workflow-gates">#</a></h2>
+<p>The public <code>monad-bft</code> workflow set shows which broad layers are currently visible in automation. The workflow names below are the public workflows visible in this checkout; they are a good map of what this repo exposes in CI here, not a claim that every validation path everywhere is listed.</p>
+<h3 id="rustyml"><code>rust.yml</code><a class="heading-anchor" aria-label="Link to this section" href="#rustyml">#</a></h3>
+<p>The main Rust workflow currently runs things like:</p>
+<ul>
+<li>lockfile verification — confirms <code>Cargo.lock</code> is in sync with <code>Cargo.toml</code></li>
+<li>unused-dependency linting via <code>cargo shear</code> — a tool that flags crates declared in <code>Cargo.toml</code> but not actually used in code</li>
+<li><code>fmt</code> — <code>cargo fmt</code>, the standard Rust code formatter, enforces consistent whitespace and style</li>
+<li><code>clippy</code> — Rust’s extensive lint checker, catches common mistakes and anti-patterns beyond what the compiler warns about</li>
+<li><code>cargo check</code> — fast compile-only pass that confirms the code type-checks without producing binaries</li>
+<li><code>cargo test --release --all-targets --all-features</code> — runs every test in every crate with every feature flag enabled, in release mode</li>
+<li>docs and doc tests — verifies rustdoc builds and the examples embedded in documentation comments still compile and run</li>
+<li>wasm check for <code>monad-debugger</code> — confirms the debugger crate still compiles to WASM (<em>WebAssembly</em>, a portable binary format that runs in browsers and other sandboxed hosts) so the browser-facing simulator stays shippable</li>
+</ul>
+<h3 id="fuzzyml"><code>fuzz.yml</code><a class="heading-anchor" aria-label="Link to this section" href="#fuzzyml">#</a></h3>
+<p>Fuzzing is separate from the normal Rust gate. The workflow installs <code>cargo-afl</code> — the Rust wrapper around <em>AFL</em> (American Fuzzy Lop), a coverage-guided fuzzer that mutates inputs and watches which code paths they hit — temporarily removes <code>monad-fuzz</code> from the excluded workspace members, and runs a quick fuzz pass. That is good evidence that parser and decoder robustness are treated as their own concern, not as an accidental side effect of normal tests.</p>
+<h3 id="benchmarksyml"><code>benchmarks.yml</code><a class="heading-anchor" aria-label="Link to this section" href="#benchmarksyml">#</a></h3>
+<p>Benchmark comparison runs on pull requests to <code>master</code>. That matters because performance regressions in this client can come from queueing, routing, proposal construction, or storage access — not only from cryptography.</p>
+<h3 id="openrpcyml"><code>openrpc.yml</code><a class="heading-anchor" aria-label="Link to this section" href="#openrpcyml">#</a></h3>
+<p>The OpenRPC workflow regenerates RPC documentation, validates it against the meta-schema, and comments diffs on PRs. That is not a protocol-correctness test, but it is still part of the confidence model: the public RPC surface is being checked as an artifact of code changes.</p>
+<h2 id="148-the-execution-repo-has-its-own-confidence-model">14.8 The Execution Repo Has Its Own Confidence Model<a class="heading-anchor" aria-label="Link to this section" href="#148-the-execution-repo-has-its-own-confidence-model">#</a></h2>
+<p>This is where the previous version of the book was too thin. The execution repo is not just a bunch of C++ code with some unit tests — it has several distinct test surfaces that cover different kinds of risk.</p>
+<h2 id="149-testethereum_test-is-the-big-compatibility-anchor">14.9 <code>test/ethereum_test</code> Is The Big Compatibility Anchor<a class="heading-anchor" aria-label="Link to this section" href="#149-testethereum_test-is-the-big-compatibility-anchor">#</a></h2>
+<p><code>test/ethereum_test</code> is the main execution-compatibility surface in the repo. Its <code>CMakeLists.txt</code> downloads execution-spec-test fixtures, builds <code>monad-ethereum-test</code>, and registers per-fork test suites from <code>homestead</code> through <code>osaka</code>. That means the execution repo is not only validating hand-written local examples — it is also validating itself against a broad external compatibility corpus. This is the closest thing to a large execution-spec regression wall in the repo.</p>
+<h3 id="what-this-layer-is-good-at">What This Layer Is Good At<a class="heading-anchor" aria-label="Link to this section" href="#what-this-layer-is-good-at">#</a></h3>
+<p>It is especially good at catching fork-specific EVM behavior mismatches, transaction and blockchain execution regressions, and unexpected incompatibilities with known Ethereum test fixtures. So when you ask “how do we know the execution engine still behaves like the intended EVM family?”, <code>test/ethereum_test</code> is one of the first answers.</p>
+<h2 id="1410-targeted-c-tests-cover-monad-specific-execution-rules">14.10 Targeted C++ Tests Cover Monad-Specific Execution Rules<a class="heading-anchor" aria-label="Link to this section" href="#1410-targeted-c-tests-cover-monad-specific-execution-rules">#</a></h2>
+<p>The execution repo also has many narrower C++ test files under <code>category/</code>. Representative areas include <code>category/execution/ethereum/*_test.cpp</code>, <code>category/execution/monad/*_test.cpp</code>, <code>category/execution/monad/staking/test_read_valset.cpp</code>, <code>category/execution/monad/reserve_balance/reserve_balance_contract_test.cpp</code>, <code>category/rpc/monad_executor_test.cpp</code>, and <code>category/mpt/test/*</code>. This layer is where the repo exercises detailed local rules that are too specific or too surgical for the big fixture suites.</p>
+<h3 id="a-few-examples">A Few Examples<a class="heading-anchor" aria-label="Link to this section" href="#a-few-examples">#</a></h3>
+<ul>
+<li><code>category/execution/ethereum/execute_transaction_test.cpp</code> checks gas-charging and refund behavior across revisions</li>
+<li><code>category/execution/monad/validate_monad_block_test.cpp</code> checks Monad block-shape rules</li>
+<li><code>category/execution/monad/staking/test_read_valset.cpp</code> checks before-boundary and in-delay-period validator-set reads</li>
+<li><code>category/rpc/monad_executor_test.cpp</code> checks hosted execution behavior such as call results, gas reporting, reserve-balance-related behavior, and trace expectations</li>
+</ul>
+<p>That is a much stronger execution-side confidence story than “we have some unit tests.”</p>
+<h2 id="1411-categoryrpcmonad_executor_testcpp-deserves-special-attention">14.11 <code>category/rpc/monad_executor_test.cpp</code> Deserves Special Attention<a class="heading-anchor" aria-label="Link to this section" href="#1411-categoryrpcmonad_executor_testcpp-deserves-special-attention">#</a></h2>
+<p>This one file deserves its own section because it sits exactly on the boundary this book talks about so often: hosted execution inside an RPC-style surface. It tests <code>eth_call</code>-style execution behavior, gas-used and gas-refund reporting, reserve balance behavior under hosted execution, and call-frame and trace expectations. That makes it a direct bridge between execution internals and RPC-observable semantics. If you change anything around hosted execution or RPC simulation semantics, this is one of the first files to read.</p>
+<h2 id="1412-test_read_valsetcpp-is-a-tiny-file-with-outsized-importance">14.12 <code>test_read_valset.cpp</code> Is A Tiny File With Outsized Importance<a class="heading-anchor" aria-label="Link to this section" href="#1412-test_read_valsetcpp-is-a-tiny-file-with-outsized-importance">#</a></h2>
+<p><code>category/execution/monad/staking/test_read_valset.cpp</code> is small, but it covers one of the easiest places for readers to form a wrong mental model: how validator-set reads behave before and during the in-epoch delay period. The tests explicitly check the current epoch before the boundary, the next epoch before the boundary, the current epoch during the delay period, and the next epoch during the delay period. That is exactly the kind of edge case that would be easy to explain too loosely in prose and much harder to get wrong once you have read the test.</p>
+<h2 id="1413-vm-tests-are-their-own-large-surface">14.13 VM Tests Are Their Own Large Surface<a class="heading-anchor" aria-label="Link to this section" href="#1413-vm-tests-are-their-own-large-surface">#</a></h2>
+<p>The execution repo also has a substantial <code>test/vm</code> tree, including <code>test/vm/unit</code>, <code>test/vm/blockchain</code>, <code>test/vm/fuzzer</code>, <code>test/vm/compile_benchmarks</code>, <code>test/vm/execution_benchmarks</code>, and <code>test/vm/data/regression_tests</code>. This is not just one more folder of misc tests — it is a separate confidence wall around the VM itself.</p>
+<h3 id="why-this-layer-exists">Why This Layer Exists<a class="heading-anchor" aria-label="Link to this section" href="#why-this-layer-exists">#</a></h3>
+<p>The execution repo does not only care that block execution eventually works. It also cares that the VM interpreter and compiler behave correctly, that VM-facing regressions are caught close to the engine, and that performance-sensitive VM paths can be benchmarked or fuzzed directly. That is why the repo also has local scripts such as <code>scripts/vm/test.sh</code> and <code>scripts/vm/fuzzer.sh</code>.</p>
+<h2 id="1414-scriptstestsh-is-the-local-top-level-execution-entry-point">14.14 <code>scripts/test.sh</code> Is The Local Top-Level Execution Entry Point<a class="heading-anchor" aria-label="Link to this section" href="#1414-scriptstestsh-is-the-local-top-level-execution-entry-point">#</a></h2>
+<p>The execution repo’s <code>scripts/test.sh</code> is worth mentioning explicitly because many developers will use it first. In the current code, it runs:</p>
+<ul>
+<li><code>ctest --output-on-failure --timeout 500 --test-dir build</code> — <code>ctest</code> is CMake’s test runner (the execution repo uses <em>CMake</em> as its C++ build system), which invokes every test registered with <code>add_test(...)</code> in the build configuration</li>
+<li><code>pytest-3 --pyargs monad</code> — runs the <code>pytest</code> suite shipped inside the installed <code>monad</code> Python package (<em>pytest</em> is the standard Python testing framework)</li>
+</ul>
+<p>with a small conditional skip for certain callgrind or disassembly-heavy tests outside the preferred build configuration. That means the local top-level test story is already a combination of compiled C++ tests and Python-side package or integration-style tests — stronger than the vague phrase “run the tests.”</p>
+<h2 id="1415-the-execution-repo-also-has-public-workflow-gates">14.15 The Execution Repo Also Has Public Workflow Gates<a class="heading-anchor" aria-label="Link to this section" href="#1415-the-execution-repo-also-has-public-workflow-gates">#</a></h2>
+<p>The current workflow set in <code>monad</code> shows which broad layers are visible in automation.</p>
+<h3 id="dockeryaml"><code>docker.yaml</code><a class="heading-anchor" aria-label="Link to this section" href="#dockeryaml">#</a></h3>
+<p>This workflow builds the main <code>build_and_test</code> Docker stage across multiple compilers and build types. That is effectively the broad execution build-and-test gate.</p>
+<h3 id="rustyml-1"><code>rust.yml</code><a class="heading-anchor" aria-label="Link to this section" href="#rustyml-1">#</a></h3>
+<p>The execution repo also has its own Rust-facing workflow for Rust subcomponents and Rust-side code-quality stages. That matters because the execution repo is not purely C++ anymore.</p>
+<h3 id="code-qualityyml"><code>code-quality.yml</code><a class="heading-anchor" aria-label="Link to this section" href="#code-qualityyml">#</a></h3>
+<p>This workflow covers formatting, trait-instantiation checks, and clang-tidy-related quality gates.</p>
+<h3 id="test-vmyml"><code>test-vm.yml</code><a class="heading-anchor" aria-label="Link to this section" href="#test-vmyml">#</a></h3>
+<p>This workflow focuses on VM tests and VM fuzzing, which is exactly the right shape for a repo where VM behavior deserves dedicated pressure.</p>
+<p>So the execution confidence model is not “local tests only.” It is local entrypoints plus several public workflow gates.</p>
+<h2 id="1416-where-to-add-coverage-depends-on-the-kind-of-change">14.16 Where To Add Coverage Depends On The Kind Of Change<a class="heading-anchor" aria-label="Link to this section" href="#1416-where-to-add-coverage-depends-on-the-kind-of-change">#</a></h2>
+<p>If you are changing:</p>
+<ul>
+<li>small Rust-side consensus logic, start with a crate test or simulation scenario in <code>monad-bft</code></li>
+<li>multi-node safety or liveness behavior, reach for <code>monad-mock-swarm</code>, <code>monad-twins</code>, or seeded randomized runs</li>
+<li>Ethereum execution semantics, start with execution C++ tests and <code>test/ethereum_test</code></li>
+<li>Monad-specific execution rules, add targeted <code>category/execution/monad/*_test.cpp</code> coverage</li>
+<li>hosted execution or <code>eth_call</code> behavior, add or update <code>category/rpc/monad_executor_test.cpp</code></li>
+<li>VM compiler or interpreter behavior, add <code>test/vm</code> coverage</li>
+</ul>
+<p>That mapping is part of the codebase’s design literacy.</p>
+<h2 id="1417-the-right-whole-system-confidence-model">14.17 The Right Whole-System Confidence Model<a class="heading-anchor" aria-label="Link to this section" href="#1417-the-right-whole-system-confidence-model">#</a></h2>
+<p>If you want one compact mental model, use this: <code>monad-bft</code> proves a lot through deterministic simulation and protocol-shaped Rust tests; <code>monad</code> proves a lot through fixture-driven EVM compatibility suites and targeted C++ tests; the boundary between them is pressured by hosted-execution and RPC-side tests; and both repos keep performance and documentation surfaces visible through dedicated workflows. That is the real confidence story behind the architecture described in the earlier chapters.</p>
+<h2 id="open-these-files-first">Open These Files First<a class="heading-anchor" aria-label="Link to this section" href="#open-these-files-first">#</a></h2>
+<ul>
+<li><a href="https://github.com/category-labs/monad-bft/tree/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-mock-swarm"><code>monad-mock-swarm</code></a>: deterministic multi-node simulation</li>
+<li><a href="https://github.com/category-labs/monad-bft/tree/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-twins"><code>monad-twins</code></a>: adversarial twins and partition scenarios</li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-randomized-tests/src/main.rs"><code>monad-randomized-tests/src/main.rs</code></a>: seeded randomized schedules</li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/.github/workflows/rust.yml"><code>.github/workflows/rust.yml</code></a>: main Rust gate in <code>monad-bft</code></li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/.github/workflows/fuzz.yml"><code>.github/workflows/fuzz.yml</code></a>: dedicated fuzz workflow in <code>monad-bft</code></li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/.github/workflows/benchmarks.yml"><code>.github/workflows/benchmarks.yml</code></a>: benchmark comparison workflow</li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/.github/workflows/openrpc.yml"><code>.github/workflows/openrpc.yml</code></a>: RPC documentation generation and validation</li>
+<li><a href="https://github.com/category-labs/monad/blob/613698c24cec49da31ae7d383307916876265070/test/ethereum_test/CMakeLists.txt"><code>test/ethereum_test/CMakeLists.txt</code></a>: execution-spec fixture suite registration across forks</li>
+<li><a href="https://github.com/category-labs/monad/blob/613698c24cec49da31ae7d383307916876265070/test/ethereum_test/src/blockchain_test.cpp"><code>test/ethereum_test/src/blockchain_test.cpp</code></a>: blockchain-fixture execution path</li>
+<li><a href="https://github.com/category-labs/monad/blob/613698c24cec49da31ae7d383307916876265070/test/ethereum_test/src/transaction_test.cpp"><code>test/ethereum_test/src/transaction_test.cpp</code></a>: transaction-fixture execution path</li>
+<li><a href="https://github.com/category-labs/monad/blob/613698c24cec49da31ae7d383307916876265070/category/rpc/monad_executor_test.cpp"><code>category/rpc/monad_executor_test.cpp</code></a>: hosted execution, gas semantics, reserve balance, traces</li>
+<li><a href="https://github.com/category-labs/monad/blob/613698c24cec49da31ae7d383307916876265070/category/execution/monad/staking/test_read_valset.cpp"><code>category/execution/monad/staking/test_read_valset.cpp</code></a>: staking-backed validator-set edge cases</li>
+<li><a href="https://github.com/category-labs/monad/blob/613698c24cec49da31ae7d383307916876265070/category/execution/monad/validate_monad_block_test.cpp"><code>category/execution/monad/validate_monad_block_test.cpp</code></a>: Monad block validation</li>
+<li><a href="https://github.com/category-labs/monad/blob/613698c24cec49da31ae7d383307916876265070/category/execution/ethereum/execute_transaction_test.cpp"><code>category/execution/ethereum/execute_transaction_test.cpp</code></a>: gas-charging and refund behavior across revisions</li>
+<li><a href="https://github.com/category-labs/monad/tree/613698c24cec49da31ae7d383307916876265070/test/vm"><code>test/vm</code></a>: VM-focused test, fuzz, and benchmark tree</li>
+<li><a href="https://github.com/category-labs/monad/blob/613698c24cec49da31ae7d383307916876265070/scripts/test.sh"><code>scripts/test.sh</code></a>: local top-level execution test entrypoint</li>
+<li><a href="https://github.com/category-labs/monad/blob/613698c24cec49da31ae7d383307916876265070/scripts/vm/test.sh"><code>scripts/vm/test.sh</code></a>: local VM test entrypoint</li>
+<li><a href="https://github.com/category-labs/monad/blob/613698c24cec49da31ae7d383307916876265070/.github/workflows/docker.yaml"><code>.github/workflows/docker.yaml</code></a>: broad build-and-test workflow in the execution repo</li>
+<li><a href="https://github.com/category-labs/monad/blob/613698c24cec49da31ae7d383307916876265070/.github/workflows/code-quality.yml"><code>.github/workflows/code-quality.yml</code></a>: code-quality workflow in the execution repo</li>
+<li><a href="https://github.com/category-labs/monad/blob/613698c24cec49da31ae7d383307916876265070/.github/workflows/test-vm.yml"><code>.github/workflows/test-vm.yml</code></a>: VM-specific workflow</li>
+</ul>  </article> <nav class="chapter-nav" aria-label="Chapter navigation"><div class="chapter-nav-item"><a href="/monad-client-book/13-failure-modes-and-defenses/"><span class="chapter-nav-label">Previous</span>
+← Chapter 13: Failure Modes and Defenses</a></div><div class="chapter-nav-item chapter-nav-item-next"><a href="/monad-client-book/15-how-monad-differs-from-ethereum/"><span class="chapter-nav-label">Next</span>Chapter 15: How Monad Differs From Ethereum →
+</a></div></nav> </main> <aside class="chapter-tools"> <section class="tools-panel" aria-label="Table of contents"> <h2>On this page</h2> <ul class="toc-list"> <li> <a class="toc-link depth-2" href="#why-this-chapter-matters"> Why This Chapter Matters </a> </li><li> <a class="toc-link depth-2" href="#141-there-is-no-one-perfect-test-layer"> 14.1 There Is No One Perfect Test Layer </a> </li><li> <a class="toc-link depth-2" href="#142-a-compact-verification-ladder"> 14.2 A Compact Verification Ladder </a> </li><li> <a class="toc-link depth-2" href="#143-the-monad-bft-confidence-model-starts-with-ordinary-rust-tests"> 14.3 The monad-bft Confidence Model Starts With Ordinary Rust Tests </a> </li><li> <a class="toc-link depth-2" href="#144-monad-mock-swarm-is-the-core-consensus-simulator"> 14.4 monad-mock-swarm Is The Core Consensus Simulator </a> </li><li> <a class="toc-link depth-3" href="#what-it-is-good-for"> What It Is Good For </a> </li><li> <a class="toc-link depth-2" href="#145-monad-twins-and-monad-randomized-tests-push-harder-on-bad-schedules"> 14.5 monad-twins And monad-randomized-tests Push Harder On Bad Schedules </a> </li><li> <a class="toc-link depth-3" href="#monad-twins"> monad-twins </a> </li><li> <a class="toc-link depth-3" href="#monad-randomized-tests"> monad-randomized-tests </a> </li><li> <a class="toc-link depth-2" href="#146-monad-testground-and-monad-debugger-sit-between-unit-tests-and-operations"> 14.6 monad-testground And monad-debugger Sit Between Unit Tests And Operations </a> </li><li> <a class="toc-link depth-3" href="#monad-testground"> monad-testground </a> </li><li> <a class="toc-link depth-3" href="#monad-debugger"> monad-debugger </a> </li><li> <a class="toc-link depth-2" href="#147-monad-bft-also-has-fuzzing-benchmarks-and-workflow-gates"> 14.7 monad-bft Also Has Fuzzing, Benchmarks, And Workflow Gates </a> </li><li> <a class="toc-link depth-3" href="#rustyml"> rust.yml </a> </li><li> <a class="toc-link depth-3" href="#fuzzyml"> fuzz.yml </a> </li><li> <a class="toc-link depth-3" href="#benchmarksyml"> benchmarks.yml </a> </li><li> <a class="toc-link depth-3" href="#openrpcyml"> openrpc.yml </a> </li><li> <a class="toc-link depth-2" href="#148-the-execution-repo-has-its-own-confidence-model"> 14.8 The Execution Repo Has Its Own Confidence Model </a> </li><li> <a class="toc-link depth-2" href="#149-testethereum_test-is-the-big-compatibility-anchor"> 14.9 test/ethereum_test Is The Big Compatibility Anchor </a> </li><li> <a class="toc-link depth-3" href="#what-this-layer-is-good-at"> What This Layer Is Good At </a> </li><li> <a class="toc-link depth-2" href="#1410-targeted-c-tests-cover-monad-specific-execution-rules"> 14.10 Targeted C++ Tests Cover Monad-Specific Execution Rules </a> </li><li> <a class="toc-link depth-3" href="#a-few-examples"> A Few Examples </a> </li><li> <a class="toc-link depth-2" href="#1411-categoryrpcmonad_executor_testcpp-deserves-special-attention"> 14.11 category/rpc/monad_executor_test.cpp Deserves Special Attention </a> </li><li> <a class="toc-link depth-2" href="#1412-test_read_valsetcpp-is-a-tiny-file-with-outsized-importance"> 14.12 test_read_valset.cpp Is A Tiny File With Outsized Importance </a> </li><li> <a class="toc-link depth-2" href="#1413-vm-tests-are-their-own-large-surface"> 14.13 VM Tests Are Their Own Large Surface </a> </li><li> <a class="toc-link depth-3" href="#why-this-layer-exists"> Why This Layer Exists </a> </li><li> <a class="toc-link depth-2" href="#1414-scriptstestsh-is-the-local-top-level-execution-entry-point"> 14.14 scripts/test.sh Is The Local Top-Level Execution Entry Point </a> </li><li> <a class="toc-link depth-2" href="#1415-the-execution-repo-also-has-public-workflow-gates"> 14.15 The Execution Repo Also Has Public Workflow Gates </a> </li><li> <a class="toc-link depth-3" href="#dockeryaml"> docker.yaml </a> </li><li> <a class="toc-link depth-3" href="#rustyml-1"> rust.yml </a> </li><li> <a class="toc-link depth-3" href="#code-qualityyml"> code-quality.yml </a> </li><li> <a class="toc-link depth-3" href="#test-vmyml"> test-vm.yml </a> </li><li> <a class="toc-link depth-2" href="#1416-where-to-add-coverage-depends-on-the-kind-of-change"> 14.16 Where To Add Coverage Depends On The Kind Of Change </a> </li><li> <a class="toc-link depth-2" href="#1417-the-right-whole-system-confidence-model"> 14.17 The Right Whole-System Confidence Model </a> </li><li> <a class="toc-link depth-2" href="#open-these-files-first"> Open These Files First </a> </li> </ul> </section> </aside> </div>  <script type="module" src="/monad-client-book/_astro/BookLayout.astro_astro_type_script_index_0_lang.Cmw0jMFF.js"></script> </body> </html>

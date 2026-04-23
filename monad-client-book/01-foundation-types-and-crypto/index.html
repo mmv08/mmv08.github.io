@@ -1,0 +1,274 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="generator" content="Astro v6.1.9"><title>Chapter 1: Foundation — Types and Cryptography</title><meta property="og:title" content="Chapter 1: Foundation — Types and Cryptography"><meta property="og:image" content="https://mmv08.github.io/monad-client-book/og-image.png"><link rel="stylesheet" href="/monad-client-book/_astro/book.np3A6oR_.css"></head> <body data-has-toc="true"> <button class="menu-toggle" id="menuToggle" aria-label="Toggle menu">☰</button> <div class="page "> <aside class="sidebar" id="sidebar"> <p class="sidebar-title"><a href="/monad-client-book/">Monad Client Book</a></p> <nav> <ul> <li> <a href="/monad-client-book/00-introduction/" class> The Monad Client: A Bottom-Up Code Walkthrough </a> </li><li> <a href="/monad-client-book/01-foundation-types-and-crypto/" class="active"> Chapter 1: Foundation — Types and Cryptography </a> </li><li> <a href="/monad-client-book/02-validators-epochs-and-leader-election/" class> Chapter 2: Validators, Epochs, and Leader Election </a> </li><li> <a href="/monad-client-book/03-consensus-data-structures/" class> Chapter 3: Consensus Data Structures </a> </li><li> <a href="/monad-client-book/04-the-consensus-protocol/" class> Chapter 4: The Consensus Protocol </a> </li><li> <a href="/monad-client-book/05-chain-config-forkpoints-and-sync/" class> Chapter 5: Chain Config, Forkpoints, Restart, and Sync </a> </li><li> <a href="/monad-client-book/06-execution-and-evm/" class> Chapter 6: Execution Boundary and Process Architecture </a> </li><li> <a href="/monad-client-book/07-execution-data-model-and-state-transition/" class> Chapter 7: Execution Data Model and State Transition </a> </li><li> <a href="/monad-client-book/08-execution-services-triedb-events-and-hosted-apis/" class> Chapter 8: Execution Services — Triedb, Event Rings, and Hosted APIs </a> </li><li> <a href="/monad-client-book/09-transaction-pool-and-fee-market/" class> Chapter 9: Transaction Pool and Fee Market </a> </li><li> <a href="/monad-client-book/10-networking-and-p2p/" class> Chapter 10: Networking and Peer-to-Peer Communication </a> </li><li> <a href="/monad-client-book/11-storage-and-state/" class> Chapter 11: Storage and State </a> </li><li> <a href="/monad-client-book/12-node-assembly-and-rpc/" class> Chapter 12: Node Assembly and RPC </a> </li><li> <a href="/monad-client-book/13-failure-modes-and-defenses/" class> Chapter 13: Failure Modes and Defenses </a> </li><li> <a href="/monad-client-book/14-testing-and-simulation/" class> Chapter 14: Testing and Simulation </a> </li><li> <a href="/monad-client-book/15-how-monad-differs-from-ethereum/" class> Chapter 15: How Monad Differs From Ethereum </a> </li><li> <a href="/monad-client-book/16-glossary-timelines-and-reading-maps/" class> Appendix: Glossary, Timelines, and Reading Maps </a> </li> </ul> </nav> </aside> <main class="main"> <header class="page-header"> <h1>Chapter 1: Foundation — Types and Cryptography</h1> <div class="source-meta"> <span class="source-path">monad-client-book/01-foundation-types-and-crypto.md</span> <a class="source-link" href="https://github.com/mmv08/category-labs-notes/blob/main/monad-client-book/01-foundation-types-and-crypto.md" target="_blank" rel="noreferrer">
+View source →
+</a> </div> </header> <article class="book-content">  <p>Before reading consensus behavior, we need the smallest nouns the rest of the code is written in.</p>
+<p>This chapter covers:</p>
+<ul>
+<li>the main clocks</li>
+<li>typed identities</li>
+<li>stake accounting</li>
+<li>hashing</li>
+<li>signing domains</li>
+<li>signature roles</li>
+<li>bounded decode helpers</li>
+</ul>
+<p>These are not “small implementation details.”
+They are the grammar the rest of the client speaks.</p>
+<h2 id="why-typed-foundations-matter">Why Typed Foundations Matter<a class="heading-anchor" aria-label="Link to this section" href="#why-typed-foundations-matter">#</a></h2>
+<p>Consensus code becomes hard to trust when it passes raw integers and raw byte arrays everywhere.</p>
+<p>Monad avoids a lot of that ambiguity by using typed wrappers:</p>
+<ul>
+<li><code>Round</code> instead of a naked <code>u64</code></li>
+<li><code>SeqNum</code> instead of “some height-like number”</li>
+<li><code>Epoch</code> instead of “current validator era, probably”</li>
+<li><code>BlockId</code> instead of “32 bytes that happen to be a block hash”</li>
+<li><code>NodeId</code> instead of “whatever key happened to sign this thing”</li>
+</ul>
+<p>That choice matters because the code is full of places where the numbers are all small, integer-shaped, and easy to confuse. The types exist to make those confusions harder to express.</p>
+<h2 id="why-this-chapter-matters">Why This Chapter Matters<a class="heading-anchor" aria-label="Link to this section" href="#why-this-chapter-matters">#</a></h2>
+<p>If you want a bottom-up understanding of Monad, later chapters only become comfortable once these tiny distinctions stop feeling tiny.</p>
+<p>For example:</p>
+<ul>
+<li>the pacemaker can only work if <code>Round</code> and <code>SeqNum</code> stay separate</li>
+<li>certificate verification only makes sense if validator identity and certificate key stay separate</li>
+<li>replay defense only works if message kinds have distinct signing domains</li>
+<li>protocol decode is only safe if length and integer bounds are enforced early</li>
+</ul>
+<p>So the point of this chapter is not just to meet the types. It is to see what bug each type is preventing.</p>
+<h2 id="11-the-three-main-clocks">1.1 The Three Main Clocks<a class="heading-anchor" aria-label="Link to this section" href="#11-the-three-main-clocks">#</a></h2>
+<p>The most important types in this chapter are the three clocks introduced in the introduction.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Type</th><th>What it means</th><th>Core question it answers</th></tr></thead><tbody><tr><td><code>Round</code></td><td>one consensus attempt</td><td>which consensus attempt are we on?</td></tr><tr><td><code>SeqNum</code></td><td>ordered consensus block height</td><td>which block in the ordered chain is this?</td></tr><tr><td><code>Epoch</code></td><td>validator-set era</td><td>which validator set is allowed to act here?</td></tr></tbody></table>
+<h3 id="round"><code>Round</code><a class="heading-anchor" aria-label="Link to this section" href="#round">#</a></h3>
+<p><code>Round</code> is the pacemaker’s clock, and a round is one attempt to advance consensus. A happy round might produce a proposal, votes, and a <em>QC</em> (quorum certificate: an aggregate signature proving that enough stake voted for the same block, introduced properly in Chapter 3). An unhappy round might instead produce timeouts, a <em>TC</em> (timeout certificate: an aggregate signature proving that enough stake gave up on this round, also detailed in Chapter 3), and recovery logic.</p>
+<p>So the right question for <code>Round</code> is “which attempt is consensus on?”, not “which block number is this?”</p>
+<h3 id="seqnum"><code>SeqNum</code><a class="heading-anchor" aria-label="Link to this section" href="#seqnum">#</a></h3>
+<p><code>SeqNum</code> is the ordered chain height. It is the number closest to <code>block.number</code> in an Ethereum developer’s mental model, but it still belongs to the consensus side of the client. The simplest invariant is that parent and child blocks differ by exactly one <code>SeqNum</code>.</p>
+<h3 id="epoch"><code>Epoch</code><a class="heading-anchor" aria-label="Link to this section" href="#epoch">#</a></h3>
+<p><code>Epoch</code> is the validator-set era. Consensus needs epochs because stake accounting only makes sense if honest nodes agree on which validator set is active while a given round is being processed.</p>
+<p>Later chapters will show that epochs are locked by boundary blocks in block-space, scheduled in round-space, and only activated later in round-space. That separation across three different moments is one of the reasons Monad feels unfamiliar at first.</p>
+<h2 id="12-why-epoch-starts-at-1">1.2 Why <code>Epoch</code> Starts At <code>1</code><a class="heading-anchor" aria-label="Link to this section" href="#12-why-epoch-starts-at-1">#</a></h2>
+<p>This looks small, but it is the kind of detail that causes confusion later if it is not said plainly.</p>
+<p>In current code, <code>GENESIS_ROUND = 0</code>, <code>GENESIS_SEQ_NUM = 0</code>, and the synthetic genesis QC anchors epoch <code>1</code>. So the useful rule is that rounds and sequence numbers begin at <code>0</code>, while the first live validator era is epoch <code>1</code>. A reader should not assume every integer-like protocol clock shares the same zero point.</p>
+<h2 id="13-boundary-blocks-and-locked-epochs">1.3 Boundary Blocks And Locked Epochs<a class="heading-anchor" aria-label="Link to this section" href="#13-boundary-blocks-and-locked-epochs">#</a></h2>
+<p>Some sequence numbers are boundary blocks: they sit at the end of an epoch-sized block interval.</p>
+<p>Boundary blocks matter because they lock the validator information for the next epoch. The important distinction is that the boundary block still belongs to the current epoch even though it locks the next one.</p>
+<p>Example with <code>epoch_length = 4</code>:</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th><code>SeqNum</code></th><th>Current epoch</th><th>Boundary block?</th><th>Locked epoch</th></tr></thead><tbody><tr><td><code>0</code></td><td><code>1</code></td><td>no</td><td>n/a</td></tr><tr><td><code>1</code></td><td><code>1</code></td><td>no</td><td>n/a</td></tr><tr><td><code>2</code></td><td><code>1</code></td><td>no</td><td>n/a</td></tr><tr><td><code>3</code></td><td><code>1</code></td><td>yes</td><td><code>2</code></td></tr></tbody></table>
+<p>The three mistakes to avoid are:</p>
+<ol>
+<li>assuming epoch numbering starts at <code>0</code></li>
+<li>assuming a boundary block belongs to the next epoch</li>
+<li>assuming “next epoch locked” and “next epoch active” are the same moment</li>
+</ol>
+<p>Only the first two are type-level mistakes.
+The third becomes a lifecycle mistake in Chapter 2.</p>
+<h2 id="14-genesis-anchors">1.4 Genesis Anchors<a class="heading-anchor" aria-label="Link to this section" href="#14-genesis-anchors">#</a></h2>
+<p>These constants recur everywhere:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="rust"><code><span class="line"><span style="color:#F97583">pub</span><span style="color:#F97583"> const</span><span style="color:#79B8FF"> GENESIS_SEQ_NUM</span><span style="color:#F97583">:</span><span style="color:#B392F0"> SeqNum</span><span style="color:#F97583"> =</span><span style="color:#B392F0"> SeqNum</span><span style="color:#E1E4E8">(</span><span style="color:#79B8FF">0</span><span style="color:#E1E4E8">);</span></span>
+<span class="line"><span style="color:#F97583">pub</span><span style="color:#F97583"> const</span><span style="color:#79B8FF"> GENESIS_ROUND</span><span style="color:#F97583">:</span><span style="color:#B392F0"> Round</span><span style="color:#F97583"> =</span><span style="color:#B392F0"> Round</span><span style="color:#E1E4E8">(</span><span style="color:#79B8FF">0</span><span style="color:#E1E4E8">);</span></span>
+<span class="line"><span style="color:#F97583">pub</span><span style="color:#F97583"> const</span><span style="color:#79B8FF"> GENESIS_BLOCK_ID</span><span style="color:#F97583">:</span><span style="color:#B392F0"> BlockId</span><span style="color:#F97583"> =</span><span style="color:#B392F0"> BlockId</span><span style="color:#E1E4E8">(</span><span style="color:#B392F0">Hash</span><span style="color:#E1E4E8">([</span><span style="color:#79B8FF">0_</span><span style="color:#B392F0">u8</span><span style="color:#E1E4E8">; </span><span style="color:#79B8FF">32</span><span style="color:#E1E4E8">]));</span></span></code></pre>
+<p>They matter because restart, safety, timeout ranking, and initial QC construction all need an exact “beginning of history” value.</p>
+<p>The point is not that genesis is special.
+The point is that history begins with precise typed anchors instead of informal sentinel values.</p>
+<h2 id="15-stake-is-not-a-node-count">1.5 Stake Is Not A Node Count<a class="heading-anchor" aria-label="Link to this section" href="#15-stake-is-not-a-node-count">#</a></h2>
+<p>Monad is stake-weighted.</p>
+<p>That means questions like:</p>
+<ul>
+<li>do we have enough votes?</li>
+<li>is this a supermajority?</li>
+<li>has the honest threshold been crossed?</li>
+</ul>
+<p>are answered over <code>Stake</code>, not over “how many validators signed.”</p>
+<p><code>Stake</code> wraps <code>U256</code>, which is a quiet reminder that these values are protocol-sized and not meant to be casual application counters.</p>
+<p>The practical lesson is that duplicate signers do not help, one validator does not get to inflate influence by appearing twice, and stake arithmetic — not signer count — is the real threshold logic.</p>
+<h2 id="16-typed-identities">1.6 Typed Identities<a class="heading-anchor" aria-label="Link to this section" href="#16-typed-identities">#</a></h2>
+<h3 id="blockid"><code>BlockId</code><a class="heading-anchor" aria-label="Link to this section" href="#blockid">#</a></h3>
+<p><code>BlockId</code> is the typed identity of a consensus block header. The wrapper matters because it stops block identity from getting mixed up with arbitrary 32-byte values, body hashes, state roots, or other payload-related hashes that happen to look the same shape.</p>
+<h3 id="block_body_id"><code>block_body_id</code><a class="heading-anchor" aria-label="Link to this section" href="#block_body_id">#</a></h3>
+<p><code>block_body_id</code> is a related but different identifier: the hash identity of the body payload. The important invariant is that header identity and body identity are different objects, and block construction checks that the body’s actual ID matches the header’s <code>block_body_id</code>. That split exists so the code can talk separately about which block header is being referred to and which body payload that header is claiming to bind to.</p>
+<h3 id="nodeid"><code>NodeId</code><a class="heading-anchor" aria-label="Link to this section" href="#nodeid">#</a></h3>
+<p><code>NodeId&#x3C;P></code> is the validator identity type. The useful detail is that it is generic over the public-key type, which lets the same higher-level logic work with production key types, mock test key types, and different certificate setups. The reader-level lesson is that <code>NodeId</code> means “who this validator is in protocol terms,” not “whatever key happened to sign this thing.”</p>
+<h2 id="17-identity-versus-certificate-key">1.7 Identity Versus Certificate Key<a class="heading-anchor" aria-label="Link to this section" href="#17-identity-versus-certificate-key">#</a></h2>
+<p>Consensus needs two related answers: which validator is this, and which key verifies this validator’s certificate contribution? That is why validator identity and certificate-verification keys are modeled separately. <code>NodeId</code> answers the first question; <code>ValidatorMapping</code> answers the second. This is not over-engineering — it is the type-level expression of a real protocol distinction.</p>
+<p>Later, when you validate a QC, TC, or <em>NEC</em> (no-endorsement certificate: aggregate proof that enough stake refused to endorse a recovered tip, covered in Chapter 3), you need both validator-set membership (for stake accounting) and the certificate key for each signer’s contribution. If those roles are blurred together, certificate validation becomes hard to reason about.</p>
+<h2 id="18-hashing">1.8 Hashing<a class="heading-anchor" aria-label="Link to this section" href="#18-hashing">#</a></h2>
+<h3 id="hash"><code>Hash</code><a class="heading-anchor" aria-label="Link to this section" href="#hash">#</a></h3>
+<p><code>Hash</code> is the shared 32-byte digest type defined in <a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-crypto/src/hasher.rs"><code>monad-crypto/src/hasher.rs</code></a>. Its formatting behavior matters more than it first looks: <code>Display</code> prints a full hex string, and <code>Debug</code> wraps that printable form. So when logs abbreviate block IDs or hashes, that is a higher-level formatting choice, not a limitation of the hash type.</p>
+<h3 id="hasher"><code>Hasher</code><a class="heading-anchor" aria-label="Link to this section" href="#hasher">#</a></h3>
+<p>The core trait is:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="rust"><code><span class="line"><span style="color:#F97583">pub</span><span style="color:#F97583"> trait</span><span style="color:#B392F0"> Hasher</span><span style="color:#F97583">:</span><span style="color:#B392F0"> Sized</span><span style="color:#E1E4E8"> {</span></span>
+<span class="line"><span style="color:#F97583">    fn</span><span style="color:#B392F0"> new</span><span style="color:#E1E4E8">() </span><span style="color:#F97583">-></span><span style="color:#79B8FF"> Self</span><span style="color:#E1E4E8">;</span></span>
+<span class="line"><span style="color:#F97583">    fn</span><span style="color:#B392F0"> update</span><span style="color:#E1E4E8">(</span><span style="color:#F97583">&#x26;mut</span><span style="color:#79B8FF"> self</span><span style="color:#E1E4E8">, data</span><span style="color:#F97583">:</span><span style="color:#F97583"> impl</span><span style="color:#B392F0"> AsRef</span><span style="color:#E1E4E8">&#x3C;[</span><span style="color:#B392F0">u8</span><span style="color:#E1E4E8">]>);</span></span>
+<span class="line"><span style="color:#F97583">    fn</span><span style="color:#B392F0"> hash</span><span style="color:#E1E4E8">(</span><span style="color:#79B8FF">self</span><span style="color:#E1E4E8">) </span><span style="color:#F97583">-></span><span style="color:#B392F0"> Hash</span><span style="color:#E1E4E8">;</span></span>
+<span class="line"><span style="color:#E1E4E8">}</span></span></code></pre>
+<p>Two details matter: <code>update</code> takes anything byte-like, and <code>hash</code> consumes the hasher rather than leaving it reusable.</p>
+<h3 id="global-default-blake3">Global Default: Blake3<a class="heading-anchor" aria-label="Link to this section" href="#global-default-blake3">#</a></h3>
+<p>The global alias is:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="rust"><code><span class="line"><span style="color:#F97583">pub</span><span style="color:#F97583"> type</span><span style="color:#B392F0"> HasherType</span><span style="color:#F97583"> =</span><span style="color:#B392F0"> Blake3Hash</span><span style="color:#E1E4E8">;</span></span></code></pre>
+<p>Blake3 is a modern, parallel-friendly cryptographic hash function; for our purposes it is just “the fast 32-byte hash the consensus side defaults to.” That means consensus-side object identities are usually Blake3 unless code explicitly says otherwise.</p>
+<h3 id="blake3-here-keccak-elsewhere">Blake3 Here, Keccak Elsewhere<a class="heading-anchor" aria-label="Link to this section" href="#blake3-here-keccak-elsewhere">#</a></h3>
+<p>The right short rule is that consensus object identity is usually Blake3-shaped, while EVM rules still use the Ethereum hashing rules they are supposed to use. (The <em>EVM</em> is the Ethereum Virtual Machine, the stack-based execution engine that runs smart-contract bytecode; <em>Keccak-256</em> is the hash Ethereum uses everywhere it computes addresses, storage slots, and transaction hashes.)</p>
+<p>So “which hash does Monad use?” is not one question. It depends on the layer.</p>
+<h2 id="19-signing-domains">1.9 Signing Domains<a class="heading-anchor" aria-label="Link to this section" href="#19-signing-domains">#</a></h2>
+<p>Signing domains stop one signature from being replayed as a different statement type.</p>
+<p>The Monad codebase makes this explicit with <code>SigningDomain</code>.</p>
+<p>At the reader level, the purpose is simple:</p>
+<ul>
+<li>a vote signature should not be reusable as a timeout signature</li>
+<li>a timeout signature should not be reusable as a tip signature</li>
+<li>a no-endorsement signature should not be reusable as a vote</li>
+</ul>
+<p>This is the same design instinct as domain separation in other protocols: sign the payload, but sign it under an explicit domain label too. That small choice prevents large classes of accidental signature reuse bugs.</p>
+<h2 id="110-two-signature-roles-not-one">1.10 Two Signature Roles, Not One<a class="heading-anchor" aria-label="Link to this section" href="#110-two-signature-roles-not-one">#</a></h2>
+<p>This distinction is easy to miss, and later consensus types get much easier to read once you keep the two roles separate. Consensus uses two broad signature roles: one outer authorship signature role, and one certificate-style statement signature role.</p>
+<h3 id="outer-signatures">Outer Signatures<a class="heading-anchor" aria-label="Link to this section" href="#outer-signatures">#</a></h3>
+<p>The outer signature role answers “who sent this network message?” and “who signed this tip as the original block-round leader?” In the generic code, this is the <code>ST</code> side.</p>
+<p>As a concrete example, a <code>ProposalMessage</code> carries a signed <code>ConsensusTip</code>, and that outer signature says the original block-round leader authored this tip.</p>
+<h3 id="certificate-style-statement-signatures">Certificate-Style Statement Signatures<a class="heading-anchor" aria-label="Link to this section" href="#certificate-style-statement-signatures">#</a></h3>
+<p>The certificate-style role answers:</p>
+<ul>
+<li>which validator voted for this block?</li>
+<li>which validator timed out this round?</li>
+<li>which validator refused endorsement of this recovered tip?</li>
+</ul>
+<p>These are the signatures that later aggregate into QCs, TCs, and NECs. In the generic code, this is the <code>SCT::SignatureType</code> side.</p>
+<h3 id="aggregates">Aggregates<a class="heading-anchor" aria-label="Link to this section" href="#aggregates">#</a></h3>
+<p>Once enough per-validator statement signatures have accumulated, the aggregate <code>SCT</code> object becomes the threshold proof.</p>
+<p>That gives the system three layers instead of one:</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Layer</th><th>What it proves</th></tr></thead><tbody><tr><td>outer message signature</td><td>one validator sent this message or authored this tip</td></tr><tr><td>per-validator protocol statement signature</td><td>one validator made one protocol statement</td></tr><tr><td>aggregate certificate</td><td>enough stake signed the same statement</td></tr></tbody></table>
+<p>That separation is a conceptual distinction the later consensus chapters rely on.</p>
+<h2 id="111-production-intuition">1.11 Production Intuition<a class="heading-anchor" aria-label="Link to this section" href="#111-production-intuition">#</a></h2>
+<p>The current production-shaped intuition lines up with those two roles.</p>
+<p>Outer message and tip authorship are secp-shaped — meaning they use <em>secp256k1</em>, the same elliptic-curve signature scheme Ethereum uses for transaction signatures. These signatures are cheap to verify individually, one at a time.</p>
+<p>Certificate contributions and aggregates are BLS-shaped — meaning they use <em>BLS</em> (Boneh-Lynn-Shacham) signatures, a scheme whose defining property is that many individual signatures over the same message can be combined into one aggregate signature that proves “all of these validators signed.” This is what makes certificates compact regardless of how many validators contributed.</p>
+<p>That is why validator plumbing later needs both a validator identity (by <code>NodeId</code>) and a validator-to-certificate-key mapping. Those questions are related, but they are not the same question.</p>
+<h2 id="112-bounded-decode-helpers">1.12 Bounded Decode Helpers<a class="heading-anchor" aria-label="Link to this section" href="#112-bounded-decode-helpers">#</a></h2>
+<p>Two helper types do a lot of quiet safety work.</p>
+<h3 id="limitedvect-n"><code>LimitedVec&#x3C;T, N></code><a class="heading-anchor" aria-label="Link to this section" href="#limitedvect-n">#</a></h3>
+<p>This is a vector whose decode path is bounded by <code>N</code>.</p>
+<p>That prevents one hostile or malformed payload from claiming an absurd list length and forcing the node into unbounded allocation.</p>
+<h3 id="boundedu64max"><code>BoundedU64&#x3C;MAX></code><a class="heading-anchor" aria-label="Link to this section" href="#boundedu64max">#</a></h3>
+<p>This is the same idea for integer values.</p>
+<p>These helpers are not glamorous, but they are part of why protocol-layer decoding is stricter than ordinary application code.</p>
+<p>They exist because network-facing code has to assume hostile inputs eventually arrive.</p>
+<h2 id="113-one-concrete-example-that-uses-the-whole-chapter">1.13 One Concrete Example That Uses The Whole Chapter<a class="heading-anchor" aria-label="Link to this section" href="#113-one-concrete-example-that-uses-the-whole-chapter">#</a></h2>
+<p>Suppose a validator says, “I vote for block <code>B</code> in round <code>17</code>, during epoch <code>4</code>.” Even that short sentence already depends on most of this chapter:</p>
+<ul>
+<li><code>Round(17)</code> says which consensus attempt this statement belongs to</li>
+<li><code>Epoch(4)</code> says which validator set is allowed to sign it</li>
+<li><code>BlockId(B)</code> says which header is being certified</li>
+<li>stake weighting decides how much this vote contributes toward a QC</li>
+<li>domain separation stops the signature from being replayed as a timeout or no-endorsement</li>
+<li>validator mapping may be needed later to verify the certificate contribution</li>
+</ul>
+<p>That is why these types matter.
+They make small protocol statements unambiguous.</p>
+<h2 id="open-these-files-first">Open These Files First<a class="heading-anchor" aria-label="Link to this section" href="#open-these-files-first">#</a></h2>
+<ul>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-types/src/lib.rs"><code>monad-types/src/lib.rs</code></a>: <code>Round</code>, <code>SeqNum</code>, <code>Epoch</code>, <code>BlockId</code>, <code>Stake</code></li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-crypto/src/hasher.rs"><code>monad-crypto/src/hasher.rs</code></a>: <code>Hash</code>, <code>Hasher</code>, Blake3 default</li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-validator/src/validator_set.rs"><code>monad-validator/src/validator_set.rs</code></a>: stake thresholds and validator-set invariants</li>
+</ul>
+<h2 id="then-open-these">Then Open These<a class="heading-anchor" aria-label="Link to this section" href="#then-open-these">#</a></h2>
+<ul>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-consensus-types/src/block.rs"><code>monad-consensus-types/src/block.rs</code></a>: block IDs versus body IDs</li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-consensus-types/src/voting.rs"><code>monad-consensus-types/src/voting.rs</code></a>: vote statements and certificate-friendly structure</li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-consensus-types/src/timeout.rs"><code>monad-consensus-types/src/timeout.rs</code></a>: timeout statements and recovery-side types</li>
+</ul>
+<h2 id="then-keep-this-cheat-sheet-nearby">Then Keep This Cheat Sheet Nearby<a class="heading-anchor" aria-label="Link to this section" href="#then-keep-this-cheat-sheet-nearby">#</a></h2>
+<p>When later chapters start feeling overloaded, come back to:
+<a href="/monad-client-book/16-glossary-timelines-and-reading-maps#clocks-and-identifiers-cheat-sheet">Appendix: Glossary, Timelines, and Reading Maps</a></p>
+<h2 id="what-to-remember">What To Remember<a class="heading-anchor" aria-label="Link to this section" href="#what-to-remember">#</a></h2>
+<ul>
+<li><code>Round</code>, <code>SeqNum</code>, and <code>Epoch</code> are different clocks for different jobs.</li>
+<li><code>Epoch</code> begins at <code>1</code>, while genesis round and sequence number begin at <code>0</code>.</li>
+<li>Boundary blocks lock the next epoch; they do not instantly activate it.</li>
+<li><code>BlockId</code> and <code>block_body_id</code> are different identities for different objects.</li>
+<li><code>NodeId</code> and validator certificate keys are related but distinct roles.</li>
+<li>Consensus object hashing is usually Blake3; EVM hashing rules still stay Ethereum-shaped where they should.</li>
+<li>Monad uses separate roles for outer authorship signatures and certificate-style statement signatures.</li>
+<li>Bounded decode helpers are part of protocol safety, not just style.</li>
+</ul>
+<p>The next chapter turns these small nouns into a social structure: validator sets, epoch activation, and leader election.</p>  </article> <nav class="chapter-nav" aria-label="Chapter navigation"><div class="chapter-nav-item"><a href="/monad-client-book/00-introduction/"><span class="chapter-nav-label">Previous</span>
+← The Monad Client: A Bottom-Up Code Walkthrough</a></div><div class="chapter-nav-item chapter-nav-item-next"><a href="/monad-client-book/02-validators-epochs-and-leader-election/"><span class="chapter-nav-label">Next</span>Chapter 2: Validators, Epochs, and Leader Election →
+</a></div></nav> </main> <aside class="chapter-tools"> <section class="tools-panel" aria-label="Table of contents"> <h2>On this page</h2> <ul class="toc-list"> <li> <a class="toc-link depth-2" href="#why-typed-foundations-matter"> Why Typed Foundations Matter </a> </li><li> <a class="toc-link depth-2" href="#why-this-chapter-matters"> Why This Chapter Matters </a> </li><li> <a class="toc-link depth-2" href="#11-the-three-main-clocks"> 1.1 The Three Main Clocks </a> </li><li> <a class="toc-link depth-3" href="#round"> Round </a> </li><li> <a class="toc-link depth-3" href="#seqnum"> SeqNum </a> </li><li> <a class="toc-link depth-3" href="#epoch"> Epoch </a> </li><li> <a class="toc-link depth-2" href="#12-why-epoch-starts-at-1"> 1.2 Why Epoch Starts At 1 </a> </li><li> <a class="toc-link depth-2" href="#13-boundary-blocks-and-locked-epochs"> 1.3 Boundary Blocks And Locked Epochs </a> </li><li> <a class="toc-link depth-2" href="#14-genesis-anchors"> 1.4 Genesis Anchors </a> </li><li> <a class="toc-link depth-2" href="#15-stake-is-not-a-node-count"> 1.5 Stake Is Not A Node Count </a> </li><li> <a class="toc-link depth-2" href="#16-typed-identities"> 1.6 Typed Identities </a> </li><li> <a class="toc-link depth-3" href="#blockid"> BlockId </a> </li><li> <a class="toc-link depth-3" href="#block_body_id"> block_body_id </a> </li><li> <a class="toc-link depth-3" href="#nodeid"> NodeId </a> </li><li> <a class="toc-link depth-2" href="#17-identity-versus-certificate-key"> 1.7 Identity Versus Certificate Key </a> </li><li> <a class="toc-link depth-2" href="#18-hashing"> 1.8 Hashing </a> </li><li> <a class="toc-link depth-3" href="#hash"> Hash </a> </li><li> <a class="toc-link depth-3" href="#hasher"> Hasher </a> </li><li> <a class="toc-link depth-3" href="#global-default-blake3"> Global Default: Blake3 </a> </li><li> <a class="toc-link depth-3" href="#blake3-here-keccak-elsewhere"> Blake3 Here, Keccak Elsewhere </a> </li><li> <a class="toc-link depth-2" href="#19-signing-domains"> 1.9 Signing Domains </a> </li><li> <a class="toc-link depth-2" href="#110-two-signature-roles-not-one"> 1.10 Two Signature Roles, Not One </a> </li><li> <a class="toc-link depth-3" href="#outer-signatures"> Outer Signatures </a> </li><li> <a class="toc-link depth-3" href="#certificate-style-statement-signatures"> Certificate-Style Statement Signatures </a> </li><li> <a class="toc-link depth-3" href="#aggregates"> Aggregates </a> </li><li> <a class="toc-link depth-2" href="#111-production-intuition"> 1.11 Production Intuition </a> </li><li> <a class="toc-link depth-2" href="#112-bounded-decode-helpers"> 1.12 Bounded Decode Helpers </a> </li><li> <a class="toc-link depth-3" href="#limitedvect-n"> LimitedVec&lt;T, N&gt; </a> </li><li> <a class="toc-link depth-3" href="#boundedu64max"> BoundedU64&lt;MAX&gt; </a> </li><li> <a class="toc-link depth-2" href="#113-one-concrete-example-that-uses-the-whole-chapter"> 1.13 One Concrete Example That Uses The Whole Chapter </a> </li><li> <a class="toc-link depth-2" href="#open-these-files-first"> Open These Files First </a> </li><li> <a class="toc-link depth-2" href="#then-open-these"> Then Open These </a> </li><li> <a class="toc-link depth-2" href="#then-keep-this-cheat-sheet-nearby"> Then Keep This Cheat Sheet Nearby </a> </li><li> <a class="toc-link depth-2" href="#what-to-remember"> What To Remember </a> </li> </ul> </section> </aside> </div>  <script type="module" src="/monad-client-book/_astro/BookLayout.astro_astro_type_script_index_0_lang.Cmw0jMFF.js"></script> </body> </html>
