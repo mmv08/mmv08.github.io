@@ -25,7 +25,7 @@ They are the grammar the rest of the client speaks.</p>
 </ul>
 <p>That choice matters because the code is full of places where the numbers are all small, integer-shaped, and easy to confuse. The types exist to make those confusions harder to express.</p>
 <h2 id="why-this-chapter-matters">Why This Chapter Matters<a class="heading-anchor" aria-label="Link to this section" href="#why-this-chapter-matters">#</a></h2>
-<p>If you want a bottom-up understanding of Monad, later chapters only become comfortable once these tiny distinctions stop feeling tiny.</p>
+<p>Later chapters only become comfortable once these small distinctions become clearly important.</p>
 <p>For example:</p>
 <ul>
 <li>the pacemaker can only work if <code>Round</code> and <code>SeqNum</code> stay separate</li>
@@ -69,7 +69,7 @@ They are the grammar the rest of the client speaks.</p>
 <p><code>SeqNum</code> is the ordered chain height. It is the number closest to <code>block.number</code> in an Ethereum developer’s mental model, but it still belongs to the consensus side of the client. The simplest invariant is that parent and child blocks differ by exactly one <code>SeqNum</code>.</p>
 <h3 id="epoch"><code>Epoch</code><a class="heading-anchor" aria-label="Link to this section" href="#epoch">#</a></h3>
 <p><code>Epoch</code> is the validator-set era. Consensus needs epochs because stake accounting only makes sense if honest nodes agree on which validator set is active while a given round is being processed.</p>
-<p>Later chapters will show that epochs are locked by boundary blocks in block-space, scheduled in round-space, and only activated later in round-space. That separation across three different moments is one of the reasons Monad feels unfamiliar at first.</p>
+<p>Later chapters will show three separate steps: boundary blocks lock epochs in block-space, <code>EpochManager</code> schedules activation in round-space, and the new epoch becomes active only when that scheduled round arrives. Keeping those steps separate makes the later code easier to follow.</p>
 <h2 id="12-why-epoch-starts-at-1">1.2 Why <code>Epoch</code> Starts At <code>1</code><a class="heading-anchor" aria-label="Link to this section" href="#12-why-epoch-starts-at-1">#</a></h2>
 <p>This looks small, but it is the kind of detail that causes confusion later if it is not said plainly.</p>
 <p>In current code, <code>GENESIS_ROUND = 0</code>, <code>GENESIS_SEQ_NUM = 0</code>, and the synthetic genesis QC anchors epoch <code>1</code>. So the useful rule is that rounds and sequence numbers begin at <code>0</code>, while the first live validator era is epoch <code>1</code>. A reader should not assume every integer-like protocol clock shares the same zero point.</p>
@@ -148,7 +148,7 @@ The point is that history begins with precise typed anchors instead of informal 
 <h3 id="nodeid"><code>NodeId</code><a class="heading-anchor" aria-label="Link to this section" href="#nodeid">#</a></h3>
 <p><code>NodeId&#x3C;P></code> is the validator identity type. The useful detail is that it is generic over the public-key type, which lets the same higher-level logic work with production key types, mock test key types, and different certificate setups. The reader-level lesson is that <code>NodeId</code> means “who this validator is in protocol terms,” not “whatever key happened to sign this thing.”</p>
 <h2 id="17-identity-versus-certificate-key">1.7 Identity Versus Certificate Key<a class="heading-anchor" aria-label="Link to this section" href="#17-identity-versus-certificate-key">#</a></h2>
-<p>Consensus needs two related answers: which validator is this, and which key verifies this validator’s certificate contribution? That is why validator identity and certificate-verification keys are modeled separately. <code>NodeId</code> answers the first question; <code>ValidatorMapping</code> answers the second. This is not over-engineering — it is the type-level expression of a real protocol distinction.</p>
+<p>Consensus needs two related answers: which validator is this, and which key verifies this validator’s certificate contribution? That is why validator identity and certificate-verification keys are modeled separately. <code>NodeId</code> answers the first question. <code>ValidatorMapping</code> answers the second. This is not extra structure for its own sake; it is the type-level expression of a real protocol distinction.</p>
 <p>Later, when you validate a QC, TC, or <em>NEC</em> (no-endorsement certificate: aggregate proof that enough stake refused to endorse a recovered tip, covered in Chapter 3), you need both validator-set membership (for stake accounting) and the certificate key for each signer’s contribution. If those roles are blurred together, certificate validation becomes hard to reason about.</p>
 <h2 id="18-hashing">1.8 Hashing<a class="heading-anchor" aria-label="Link to this section" href="#18-hashing">#</a></h2>
 <h3 id="hash"><code>Hash</code><a class="heading-anchor" aria-label="Link to this section" href="#hash">#</a></h3>
@@ -164,9 +164,9 @@ The point is that history begins with precise typed anchors instead of informal 
 <h3 id="global-default-blake3">Global Default: Blake3<a class="heading-anchor" aria-label="Link to this section" href="#global-default-blake3">#</a></h3>
 <p>The global alias is:</p>
 <pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="rust"><code><span class="line"><span style="color:#F97583">pub</span><span style="color:#F97583"> type</span><span style="color:#B392F0"> HasherType</span><span style="color:#F97583"> =</span><span style="color:#B392F0"> Blake3Hash</span><span style="color:#E1E4E8">;</span></span></code></pre>
-<p>Blake3 is a modern, parallel-friendly cryptographic hash function; for our purposes it is just “the fast 32-byte hash the consensus side defaults to.” That means consensus-side object identities are usually Blake3 unless code explicitly says otherwise.</p>
+<p>Blake3 is a modern, parallel-friendly cryptographic hash function. In this book, the useful meaning is simpler: it is the 32-byte hash the consensus side defaults to. That means consensus-side object identities are usually Blake3 unless code explicitly says otherwise.</p>
 <h3 id="blake3-here-keccak-elsewhere">Blake3 Here, Keccak Elsewhere<a class="heading-anchor" aria-label="Link to this section" href="#blake3-here-keccak-elsewhere">#</a></h3>
-<p>The right short rule is that consensus object identity is usually Blake3-shaped, while EVM rules still use the Ethereum hashing rules they are supposed to use. (The <em>EVM</em> is the Ethereum Virtual Machine, the stack-based execution engine that runs smart-contract bytecode; <em>Keccak-256</em> is the hash Ethereum uses everywhere it computes addresses, storage slots, and transaction hashes.)</p>
+<p>The right short rule is that consensus object identity is usually Blake3-shaped, while EVM rules still use Ethereum hashing where Ethereum semantics require it. The <em>EVM</em> is the Ethereum Virtual Machine, the stack-based execution engine that runs smart-contract bytecode. <em>Keccak-256</em> is the hash Ethereum uses to compute addresses, storage slots, and transaction hashes.</p>
 <p>So “which hash does Monad use?” is not one question. It depends on the layer.</p>
 <h2 id="19-signing-domains">1.9 Signing Domains<a class="heading-anchor" aria-label="Link to this section" href="#19-signing-domains">#</a></h2>
 <p>Signing domains stop one signature from being replayed as a different statement type.</p>

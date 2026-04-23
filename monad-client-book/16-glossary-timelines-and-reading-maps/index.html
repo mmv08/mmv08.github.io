@@ -19,8 +19,7 @@ It is less good when you later want to answer a narrow question such as:</p>
 <li>which functions should I open first for proposal handling?</li>
 </ul>
 <p>This appendix is the fast answer layer.</p>
-<p>Source links in this appendix are pinned to the reviewed <code>monad-bft</code> and <code>monad</code> commits for this edition.
-The local checkouts are still authoritative if anything ever drifts.</p>
+<p>Source links in this appendix are pinned to the reviewed <code>monad-bft</code> and <code>monad</code> commits for this edition.</p>
 <h2 id="the-canonical-delayed-execution-timeline">The Canonical Delayed-Execution Timeline<a class="heading-anchor" aria-label="Link to this section" href="#the-canonical-delayed-execution-timeline">#</a></h2>
 <p>This is the single most important timeline in the whole book.</p>
 <p>The current <code>monad-node</code> wiring uses:</p>
@@ -91,9 +90,9 @@ This table is the compact version to keep in your head.</p>
 
 
 
-<table><thead><tr><th>Time</th><th>Consensus side</th><th>Execution side</th><th>Why it matters</th></tr></thead><tbody><tr><td>block <code>N</code> is ordered</td><td><code>SeqNum(N)</code> exists now</td><td>execution of <code>N</code> is not yet the newest visible result</td><td>ordering and execution are intentionally split</td></tr><tr><td>blocks <code>N+1</code> and <code>N+2</code> are ordered</td><td>more consensus history accumulates</td><td>ordering still sees a lagged execution state</td><td>reserve balance and coherency checks matter</td></tr><tr><td>block <code>N+3</code> is ordered</td><td>a later header can carry delayed results for older work</td><td>execution can now validate delayed results for <code>N</code> against canonical block history</td><td>delayed results are not free-floating blobs</td></tr></tbody></table>
+<table><thead><tr><th>Time</th><th>Consensus side</th><th>Execution side</th><th>Why it matters</th></tr></thead><tbody><tr><td>block <code>N</code> is ordered</td><td><code>SeqNum(N)</code> exists now</td><td>execution of <code>N</code> is not yet the newest visible result</td><td>ordering and execution are intentionally split</td></tr><tr><td>blocks <code>N+1</code> and <code>N+2</code> are ordered</td><td>more consensus history accumulates</td><td>ordering still sees a lagged execution state</td><td>reserve balance and coherency checks matter</td></tr><tr><td>block <code>N+3</code> is ordered</td><td>a later header can carry delayed results for older work</td><td>execution can now validate delayed results for <code>N</code> against canonical block history</td><td>delayed results are not standalone blobs</td></tr></tbody></table>
 <h3 id="what-this-timeline-explains">What This Timeline Explains<a class="heading-anchor" aria-label="Link to this section" href="#what-this-timeline-explains">#</a></h3>
-<p>If this table clicks, these later design choices stop feeling arbitrary:</p>
+<p>If this table clicks, these later design choices become easier to explain:</p>
 <ul>
 <li>a block can be valid but not yet coherent</li>
 <li>block headers carry <code>execution_inputs</code></li>
@@ -155,6 +154,7 @@ This table is the compact version to keep in your head.</p>
 
 
 <table><thead><tr><th>Name</th><th>What it means</th><th>Do not confuse it with</th></tr></thead><tbody><tr><td><code>Round</code></td><td>one consensus attempt</td><td>block height</td></tr><tr><td><code>block_round</code></td><td>round in which the block was originally authored</td><td>current proposal round</td></tr><tr><td><code>proposal_round</code></td><td>round in which this proposal message is being sent</td><td>block height</td></tr><tr><td><code>SeqNum</code></td><td>ordered consensus block height</td><td>round</td></tr><tr><td><code>Epoch</code></td><td>validator-set era</td><td>block height only</td></tr><tr><td>execution block number</td><td>execution-side numeric block height view</td><td>proposal round</td></tr><tr><td><code>BlockId</code></td><td>typed identity of a consensus block header</td><td>body ID or arbitrary hash</td></tr><tr><td><code>block_body_id</code></td><td>hash identity of the block body</td><td>header block ID</td></tr></tbody></table>
+<p><strong>ordered block</strong> means a consensus block has entered the ordered block pipeline and can be reasoned about by later subsystems. It is not automatically the same thing as finalized.</p>
 <h2 id="freshness-and-read-surfaces-cheat-sheet">Freshness And Read Surfaces Cheat Sheet<a class="heading-anchor" aria-label="Link to this section" href="#freshness-and-read-surfaces-cheat-sheet">#</a></h2>
 <p>The question “what is latest?” is underspecified in Monad.</p>
 <p>Ask two questions instead:</p>
@@ -188,7 +188,13 @@ This table is the compact version to keep in your head.</p>
 
 
 
-<table><thead><tr><th>Word</th><th>Short meaning</th><th>Typical place it appears</th></tr></thead><tbody><tr><td><code>proposed</code></td><td>newest observed head</td><td>ledger head marker, triedb metadata, event stream, RPC</td></tr><tr><td><code>voted</code></td><td>stronger intermediate head</td><td>ledger head marker, triedb metadata, event stream</td></tr><tr><td><code>finalized</code></td><td>durable committed anchor</td><td>ledger head marker, triedb metadata, event stream, restart logic</td></tr></tbody></table>
+
+
+
+
+
+<table><thead><tr><th>Word</th><th>Short meaning</th><th>Typical place it appears</th></tr></thead><tbody><tr><td><code>proposed</code></td><td>newest observed head</td><td>ledger head marker, triedb metadata, event stream, RPC</td></tr><tr><td><code>voted</code></td><td>stronger intermediate head</td><td>ledger head marker, triedb metadata, event stream</td></tr><tr><td><code>finalized</code></td><td>durable committed anchor</td><td>ledger head marker, triedb metadata, event stream, restart logic</td></tr><tr><td><code>verified</code></td><td>execution outputs and state root have been included in a finalized later block</td><td>execution events</td></tr></tbody></table>
+<p><code>verified</code> is intentionally listed with a narrower “typical place.” It is part of the execution-event vocabulary, not another ledger head marker beside proposed, voted, and finalized.</p>
 <h3 id="surfaces">Surfaces<a class="heading-anchor" aria-label="Link to this section" href="#surfaces">#</a></h3>
 
 
@@ -322,6 +328,8 @@ The freshest execution-event stream. Good for live subscriptions, not for durabl
 Older block-oriented history such as old blocks, receipts, traces, and indexes. Not a general historical world-state engine.</p>
 <p><strong>WAL</strong><br>
 Write-ahead log of node input events for replay and debugging.</p>
+<p><strong>verified</strong>
+Execution-event state meaning the execution outputs and state root for a block have been included in a finalized later block. <code>ExecEventsBuffer</code> ignores this state because its head trackers are proposed, voted, and finalized heights.</p>
 <h3 id="networking-terms">Networking Terms<a class="heading-anchor" aria-label="Link to this section" href="#networking-terms">#</a></h3>
 <p><strong>WireAuth</strong><br>
 Authenticated UDP session layer with replay filtering and cookie-based anti-spoofing defenses.</p>
@@ -386,7 +394,7 @@ They are the best first functions to open if you want the book to line up with t
 <li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-state/src/consensus.rs"><code>monad-state/src/consensus.rs</code></a>: prefiltering and message routing into consensus handlers</li>
 <li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-consensus/src/pacemaker.rs"><code>monad-consensus/src/pacemaker.rs</code></a>: round advancement and high-certificate handling</li>
 <li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-consensus/src/vote_state.rs"><code>monad-consensus/src/vote_state.rs</code></a>: vote aggregation and QC creation</li>
-<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-consensus/src/validation/safety.rs"><code>monad-consensus/src/validation/safety.rs</code></a>: honest-node self-defense rules</li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-consensus/src/validation/safety.rs"><code>monad-consensus/src/validation/safety.rs</code></a>: honest-node local safety rules</li>
 </ul>
 <h3 id="restart-and-sync">Restart And Sync<a class="heading-anchor" aria-label="Link to this section" href="#restart-and-sync">#</a></h3>
 <ul>
@@ -418,7 +426,6 @@ They are the best first functions to open if you want the book to line up with t
 </ul>
 <h3 id="storage">Storage<a class="heading-anchor" aria-label="Link to this section" href="#storage">#</a></h3>
 <ul>
-<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/docs/storage_paths.md"><code>docs/storage_paths.md</code></a>: deeper storage companion note</li>
 <li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-block-persist/src/lib.rs"><code>monad-block-persist/src/lib.rs</code></a>: body/header write order and atomic head-link updates</li>
 <li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-ledger/src/lib.rs"><code>monad-ledger/src/lib.rs</code></a>: execution ledger wrapper and blocksync serving behavior</li>
 <li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-wal/src/wal.rs"><code>monad-wal/src/wal.rs</code></a>: WAL record format and sync behavior</li>
