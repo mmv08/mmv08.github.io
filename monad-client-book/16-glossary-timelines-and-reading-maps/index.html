@@ -274,7 +274,19 @@ This table is the compact version to keep in your head.</p>
 
 
 
-<table><thead><tr><th>Query</th><th>Main path today</th></tr></thead><tbody><tr><td><code>eth_blockNumber</code></td><td>triedb metadata</td></tr><tr><td><code>eth_getBalance</code></td><td>triedb</td></tr><tr><td><code>eth_getCode</code></td><td>triedb</td></tr><tr><td><code>eth_getTransactionReceipt</code></td><td>recent buffer -> triedb -> archive</td></tr><tr><td><code>eth_getTransactionByHash</code></td><td>recent buffer -> triedb -> archive</td></tr><tr><td><code>eth_call</code></td><td>triedb-backed block context -> hosted execution</td></tr><tr><td>standard WS <code>newHeads</code> / <code>logs</code></td><td>event ring -> WebSocket handler, filtered to proposed commit state</td></tr><tr><td>Monad WS <code>monadNewHeads</code> / <code>monadLogs</code></td><td>event ring -> WebSocket handler, with commit state preserved</td></tr></tbody></table>
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Query</th><th>Main path today</th></tr></thead><tbody><tr><td><code>eth_blockNumber</code></td><td>triedb metadata</td></tr><tr><td><code>eth_getBalance</code></td><td>triedb</td></tr><tr><td><code>eth_getCode</code></td><td>triedb</td></tr><tr><td><code>eth_getTransactionReceipt</code></td><td>recent buffer -> triedb -> archive</td></tr><tr><td><code>eth_getTransactionByHash</code></td><td>recent buffer -> triedb -> archive</td></tr><tr><td><code>eth_call</code></td><td>triedb-backed block context -> hosted execution</td></tr><tr><td><code>eth_estimateGas</code></td><td>triedb-backed block context -> hosted execution -> gas search requiring simulated success</td></tr><tr><td><code>eth_fillTransaction</code></td><td>triedb-backed latest context -> hosted execution-assisted filling of nonce, fees, chain ID, value, and gas</td></tr><tr><td><code>eth_feeHistory</code></td><td>triedb-backed retained fee/header history</td></tr><tr><td>standard WS <code>newHeads</code> / <code>logs</code></td><td>event ring -> WebSocket handler, filtered to proposed commit state</td></tr><tr><td>Monad WS <code>monadNewHeads</code> / <code>monadLogs</code></td><td>event ring -> WebSocket handler, with commit state preserved</td></tr></tbody></table>
 <h2 id="global-glossary">Global Glossary<a class="heading-anchor" aria-label="Link to this section" href="#global-glossary">#</a></h2>
 <h3 id="consensus-terms">Consensus Terms<a class="heading-anchor" aria-label="Link to this section" href="#consensus-terms">#</a></h3>
 <p><strong><code>round</code></strong><br>
@@ -388,6 +400,124 @@ Exponential moving average. Used in peer-scoring logic to smooth noisy recent be
 <h2 id="function-level-reading-maps">Function-Level Reading Maps<a class="heading-anchor" aria-label="Link to this section" href="#function-level-reading-maps">#</a></h2>
 <p>These are not the only important functions.
 They are the best first functions to open if you want the book to line up with the code quickly.</p>
+<h2 id="snippet-anchor-map">Snippet Anchor Map<a class="heading-anchor" aria-label="Link to this section" href="#snippet-anchor-map">#</a></h2>
+<p>Use this table when you remember the concept but not where the book showed the production shape.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Concept</th><th>Chapter</th><th>Source anchor</th></tr></thead><tbody><tr><td>process boundary</td><td>Chapter 00</td><td>systemd <code>monad-node</code>, <code>monad</code>, and <code>monad-rpc</code> service lines</td></tr><tr><td>clocks and IDs</td><td>Chapter 01</td><td><code>monad-types/src/lib.rs</code> newtypes and <code>SeqNum</code> helpers</td></tr><tr><td>signing domains</td><td>Chapter 01</td><td><code>monad-crypto/src/signing_domain.rs</code></td></tr><tr><td>validator-set validity and quorum threshold</td><td>Chapter 02</td><td><code>monad-validator/src/validator_set.rs</code></td></tr><tr><td>epoch scheduling and leader selection</td><td>Chapter 02</td><td><code>monad-validator/src/epoch_manager.rs</code>, <code>weighted_round_robin.rs</code></td></tr><tr><td>validator-set updater and execution read bridge</td><td>Chapter 02</td><td><code>monad-updaters/src/triedb_val_set.rs</code>, <code>read_valset.cpp</code></td></tr><tr><td>vote, QC, execution protocol, block header</td><td>Chapter 03</td><td><code>monad-consensus-types</code> and <code>monad-types</code></td></tr><tr><td>block policy and optimistic commit bridge</td><td>Chapter 03</td><td><code>monad-consensus-types/src/block.rs</code>, <code>monad-consensus-state/src/command.rs</code></td></tr><tr><td>consensus envelope and stale-message prefilter</td><td>Chapter 04</td><td><code>messages/message.rs</code>, <code>messages/consensus_message.rs</code>, <code>monad-state/src/consensus.rs</code></td></tr><tr><td>proposal gate order and coherency update</td><td>Chapter 04</td><td><code>monad-consensus-state/src/lib.rs</code>, <code>monad-blocktree/src/blocktree.rs</code></td></tr><tr><td>sync/live mode and delayed-anchor readiness</td><td>Chapter 05</td><td><code>monad-state/src/lib.rs</code>, <code>monad-state/src/statesync.rs</code></td></tr><tr><td>execution daemon boundary and <code>propose_block</code></td><td>Chapter 06</td><td><code>cmd/monad/main.cpp</code>, <code>cmd/monad/runloop_monad.cpp</code></td></tr><tr><td>C++ block mirror, system txs, reserve balance</td><td>Chapter 07</td><td><code>monad_block.hpp</code>, <code>validate_monad_block.cpp</code>, <code>reserve_balance.cpp</code></td></tr><tr><td>triedb/state backend and event buffer</td><td>Chapter 08</td><td><code>monad-state-backend/src/lib.rs</code>, <code>monad-rpc/src/data/buffer.rs</code></td></tr><tr><td>txpool ingress, sequencer, proposal command</td><td>Chapter 09</td><td><code>monad-eth-txpool</code>, <code>monad-eth-txpool-executor</code></td></tr><tr><td>peer identity and router intent</td><td>Chapter 10</td><td><code>monad-peer-discovery</code>, <code>monad-router-multi</code>, <code>monad-executor-glue</code></td></tr><tr><td>ledger and triedb key shape</td><td>Chapter 11</td><td><code>monad-block-persist</code>, <code>monad-triedb-utils/src/key.rs</code></td></tr><tr><td>parent executor, RPC send path, WebSocket gap handling</td><td>Chapter 12</td><td><code>monad-updaters/src/parent.rs</code>, <code>monad-rpc</code> handlers</td></tr><tr><td>narrow failure responses</td><td>Chapter 13</td><td><code>vote_state.rs</code>, <code>safety.rs</code>, <code>replay_filter.rs</code></td></tr><tr><td>simulation and fixture confidence</td><td>Chapter 14</td><td><code>monad-mock-swarm</code>, <code>monad-twins</code>, <code>test/ethereum_test</code></td></tr><tr><td>Ethereum comparison anchors</td><td>Chapter 15</td><td>consensus header and reserve-balance enforcement snippets</td></tr></tbody></table>
 <h3 id="consensus-protocol">Consensus Protocol<a class="heading-anchor" aria-label="Link to this section" href="#consensus-protocol">#</a></h3>
 <ul>
 <li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-consensus-state/src/lib.rs"><code>monad-consensus-state/src/lib.rs</code></a>: <code>handle_proposal_message</code>, <code>validate_block</code>, <code>process_tc</code>, <code>try_vote</code></li>
@@ -401,6 +531,13 @@ They are the best first functions to open if you want the book to line up with t
 <li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-state/src/lib.rs"><code>monad-state/src/lib.rs</code></a>: <code>maybe_start_consensus</code></li>
 <li>the same file: <code>DoneSync</code> handling and the live-transition path</li>
 <li>the same file: staking-backed validator-set recheck on rejoin</li>
+</ul>
+<h3 id="validators-and-epochs">Validators And Epochs<a class="heading-anchor" aria-label="Link to this section" href="#validators-and-epochs">#</a></h3>
+<ul>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-validator/src/validator_set.rs"><code>monad-validator/src/validator_set.rs</code></a>: validator-set creation invariants and stake thresholds</li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-validator/src/epoch_manager.rs"><code>monad-validator/src/epoch_manager.rs</code></a>: boundary-block scheduling into round-space epoch activation</li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-updaters/src/triedb_val_set.rs"><code>monad-updaters/src/triedb_val_set.rs</code></a>: finalized-boundary validator-set updater</li>
+<li><a href="https://github.com/category-labs/monad/blob/613698c24cec49da31ae7d383307916876265070/category/execution/monad/staking/read_valset.cpp"><code>category/execution/monad/staking/read_valset.cpp</code></a>: execution-backed current or next epoch admissibility</li>
 </ul>
 <h3 id="txpool">Txpool<a class="heading-anchor" aria-label="Link to this section" href="#txpool">#</a></h3>
 <ul>
@@ -420,6 +557,7 @@ They are the best first functions to open if you want the book to line up with t
 <ul>
 <li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-rpc/src/data/mod.rs"><code>monad-rpc/src/data/mod.rs</code></a>: <code>DataProvider</code>, <code>get_latest_block_number</code>, recent/buffer/archive composition</li>
 <li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-rpc/src/data/buffer.rs"><code>monad-rpc/src/data/buffer.rs</code></a>: <code>ExecEventsBuffer::insert</code></li>
+<li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-rpc/src/handlers/eth/gas.rs"><code>monad-rpc/src/handlers/eth/gas.rs</code></a>: <code>eth_estimateGas</code>, <code>eth_fillTransaction</code>, and <code>eth_feeHistory</code></li>
 <li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-triedb-utils/src/triedb_env.rs"><code>monad-triedb-utils/src/triedb_env.rs</code></a>: triedb metadata polling and broader RPC-facing adapter</li>
 <li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-state-backend/src/thread.rs"><code>monad-state-backend/src/thread.rs</code></a>: narrow consensus-side triedb worker boundary</li>
 <li><a href="https://github.com/category-labs/monad-bft/blob/544e0bc286ea9310db779c02c223d2baa0cc306f/monad-rpc/src/websocket/handler.rs"><code>monad-rpc/src/websocket/handler.rs</code></a>: subscription filtering, gap handling, and commit-state exposure</li>
@@ -450,4 +588,4 @@ They are the best first functions to open if you want the book to line up with t
 </ul>
 <p>The appendix is not meant to replace the main chapters.
 It is meant to keep the main chapters from falling out of your head between reads.</p>  </article> <nav class="chapter-nav" aria-label="Chapter navigation"><div class="chapter-nav-item"><a href="/monad-client-book/15-how-monad-differs-from-ethereum/"><span class="chapter-nav-label">Previous</span>
-← Chapter 15: How Monad Differs From Ethereum</a></div><div class="chapter-nav-item chapter-nav-item-next"></div></nav> </main> <aside class="chapter-tools"> <section class="tools-panel" aria-label="Table of contents"> <h2>On this page</h2> <ul class="toc-list"> <li> <a class="toc-link depth-2" href="#why-this-appendix-exists"> Why This Appendix Exists </a> </li><li> <a class="toc-link depth-2" href="#the-canonical-delayed-execution-timeline"> The Canonical Delayed-Execution Timeline </a> </li><li> <a class="toc-link depth-3" href="#high-level-picture"> High-Level Picture </a> </li><li> <a class="toc-link depth-3" href="#the-same-picture-in-system-terms"> The Same Picture In System Terms </a> </li><li> <a class="toc-link depth-3" href="#what-this-timeline-explains"> What This Timeline Explains </a> </li><li> <a class="toc-link depth-2" href="#clocks-and-identifiers-cheat-sheet"> Clocks And Identifiers Cheat Sheet </a> </li><li> <a class="toc-link depth-2" href="#freshness-and-read-surfaces-cheat-sheet"> Freshness And Read Surfaces Cheat Sheet </a> </li><li> <a class="toc-link depth-3" href="#freshness-words"> Freshness Words </a> </li><li> <a class="toc-link depth-3" href="#surfaces"> Surfaces </a> </li><li> <a class="toc-link depth-3" href="#one-practical-rpc-matrix"> One Practical RPC Matrix </a> </li><li> <a class="toc-link depth-2" href="#global-glossary"> Global Glossary </a> </li><li> <a class="toc-link depth-3" href="#consensus-terms"> Consensus Terms </a> </li><li> <a class="toc-link depth-3" href="#validity-terms"> Validity Terms </a> </li><li> <a class="toc-link depth-3" href="#restart-and-sync-terms"> Restart And Sync Terms </a> </li><li> <a class="toc-link depth-3" href="#storage-and-read-surface-terms"> Storage And Read-Surface Terms </a> </li><li> <a class="toc-link depth-3" href="#networking-terms"> Networking Terms </a> </li><li> <a class="toc-link depth-2" href="#recovery-objects-at-a-glance"> Recovery Objects At A Glance </a> </li><li> <a class="toc-link depth-2" href="#function-level-reading-maps"> Function-Level Reading Maps </a> </li><li> <a class="toc-link depth-3" href="#consensus-protocol"> Consensus Protocol </a> </li><li> <a class="toc-link depth-3" href="#restart-and-sync"> Restart And Sync </a> </li><li> <a class="toc-link depth-3" href="#txpool"> Txpool </a> </li><li> <a class="toc-link depth-3" href="#execution"> Execution </a> </li><li> <a class="toc-link depth-3" href="#read-surfaces-and-rpc"> Read Surfaces And RPC </a> </li><li> <a class="toc-link depth-3" href="#storage"> Storage </a> </li><li> <a class="toc-link depth-3" href="#testing"> Testing </a> </li><li> <a class="toc-link depth-2" href="#when-to-re-read-this-appendix"> When To Re-Read This Appendix </a> </li> </ul> </section> </aside> </div>  <script type="module" src="/monad-client-book/_astro/BookLayout.astro_astro_type_script_index_0_lang.Cmw0jMFF.js"></script> </body> </html>
+← Chapter 15: How Monad Differs From Ethereum</a></div><div class="chapter-nav-item chapter-nav-item-next"></div></nav> </main> <aside class="chapter-tools"> <section class="tools-panel" aria-label="Table of contents"> <h2>On this page</h2> <ul class="toc-list"> <li> <a class="toc-link depth-2" href="#why-this-appendix-exists"> Why This Appendix Exists </a> </li><li> <a class="toc-link depth-2" href="#the-canonical-delayed-execution-timeline"> The Canonical Delayed-Execution Timeline </a> </li><li> <a class="toc-link depth-3" href="#high-level-picture"> High-Level Picture </a> </li><li> <a class="toc-link depth-3" href="#the-same-picture-in-system-terms"> The Same Picture In System Terms </a> </li><li> <a class="toc-link depth-3" href="#what-this-timeline-explains"> What This Timeline Explains </a> </li><li> <a class="toc-link depth-2" href="#clocks-and-identifiers-cheat-sheet"> Clocks And Identifiers Cheat Sheet </a> </li><li> <a class="toc-link depth-2" href="#freshness-and-read-surfaces-cheat-sheet"> Freshness And Read Surfaces Cheat Sheet </a> </li><li> <a class="toc-link depth-3" href="#freshness-words"> Freshness Words </a> </li><li> <a class="toc-link depth-3" href="#surfaces"> Surfaces </a> </li><li> <a class="toc-link depth-3" href="#one-practical-rpc-matrix"> One Practical RPC Matrix </a> </li><li> <a class="toc-link depth-2" href="#global-glossary"> Global Glossary </a> </li><li> <a class="toc-link depth-3" href="#consensus-terms"> Consensus Terms </a> </li><li> <a class="toc-link depth-3" href="#validity-terms"> Validity Terms </a> </li><li> <a class="toc-link depth-3" href="#restart-and-sync-terms"> Restart And Sync Terms </a> </li><li> <a class="toc-link depth-3" href="#storage-and-read-surface-terms"> Storage And Read-Surface Terms </a> </li><li> <a class="toc-link depth-3" href="#networking-terms"> Networking Terms </a> </li><li> <a class="toc-link depth-2" href="#recovery-objects-at-a-glance"> Recovery Objects At A Glance </a> </li><li> <a class="toc-link depth-2" href="#function-level-reading-maps"> Function-Level Reading Maps </a> </li><li> <a class="toc-link depth-2" href="#snippet-anchor-map"> Snippet Anchor Map </a> </li><li> <a class="toc-link depth-3" href="#consensus-protocol"> Consensus Protocol </a> </li><li> <a class="toc-link depth-3" href="#restart-and-sync"> Restart And Sync </a> </li><li> <a class="toc-link depth-3" href="#validators-and-epochs"> Validators And Epochs </a> </li><li> <a class="toc-link depth-3" href="#txpool"> Txpool </a> </li><li> <a class="toc-link depth-3" href="#execution"> Execution </a> </li><li> <a class="toc-link depth-3" href="#read-surfaces-and-rpc"> Read Surfaces And RPC </a> </li><li> <a class="toc-link depth-3" href="#storage"> Storage </a> </li><li> <a class="toc-link depth-3" href="#testing"> Testing </a> </li><li> <a class="toc-link depth-2" href="#when-to-re-read-this-appendix"> When To Re-Read This Appendix </a> </li> </ul> </section> </aside> </div>  <script type="module" src="/monad-client-book/_astro/BookLayout.astro_astro_type_script_index_0_lang.Cmw0jMFF.js"></script> </body> </html>

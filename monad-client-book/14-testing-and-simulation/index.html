@@ -80,12 +80,92 @@ View source →
 <p>The environment is mocked; the protocol style is not. That makes it much more valuable than a toy model that only vaguely resembles the client.</p>
 <h3 id="what-it-is-good-for">What It Is Good For<a class="heading-anchor" aria-label="Link to this section" href="#what-it-is-good-for">#</a></h3>
 <p><code>monad-mock-swarm</code> is the right tool when you want to pressure safety under complex schedules, liveness under delays, state-machine behavior across multiple nodes, or invariants that only appear once several roles interact.</p>
+<p>Abridged from production code. The important detail is that the simulator still drives <code>MonadState</code> through events and commands:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="rust"><code><span class="line"><span style="color:#F97583">pub</span><span style="color:#F97583"> fn</span><span style="color:#B392F0"> step_until</span><span style="color:#E1E4E8">(</span></span>
+<span class="line"><span style="color:#F97583">    &#x26;mut</span><span style="color:#79B8FF"> self</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">    until</span><span style="color:#F97583">:</span><span style="color:#B392F0"> Duration</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">    emitted_messages</span><span style="color:#F97583">:</span><span style="color:#F97583"> &#x26;mut</span><span style="color:#B392F0"> Vec</span><span style="color:#E1E4E8">&#x3C;(</span><span style="color:#B392F0">Duration</span><span style="color:#E1E4E8">, </span><span style="color:#B392F0">LinkMessage</span><span style="color:#E1E4E8">&#x3C;_, _>)>,</span></span>
+<span class="line"><span style="color:#E1E4E8">) </span><span style="color:#F97583">-></span><span style="color:#B392F0"> Option</span><span style="color:#E1E4E8">&#x3C;(</span></span>
+<span class="line"><span style="color:#B392F0">    Duration</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#B392F0">    MonadEvent</span><span style="color:#E1E4E8">&#x3C;</span><span style="color:#B392F0">S</span><span style="color:#F97583">::</span><span style="color:#B392F0">SignatureType</span><span style="color:#E1E4E8">, </span><span style="color:#B392F0">S</span><span style="color:#F97583">::</span><span style="color:#B392F0">SignatureCollectionType</span><span style="color:#E1E4E8">, </span><span style="color:#B392F0">S</span><span style="color:#F97583">::</span><span style="color:#B392F0">ExecutionProtocolType</span><span style="color:#E1E4E8">>,</span></span>
+<span class="line"><span style="color:#E1E4E8">)> {</span></span>
+<span class="line"><span style="color:#F97583">    while</span><span style="color:#F97583"> let</span><span style="color:#B392F0"> Some</span><span style="color:#E1E4E8">((tick, event_type)) </span><span style="color:#F97583">=</span><span style="color:#79B8FF"> self</span><span style="color:#F97583">.</span><span style="color:#B392F0">peek_event</span><span style="color:#E1E4E8">() {</span></span>
+<span class="line"><span style="color:#F97583">        if</span><span style="color:#E1E4E8"> tick </span><span style="color:#F97583">></span><span style="color:#E1E4E8"> until {</span></span>
+<span class="line"><span style="color:#F97583">            break</span><span style="color:#E1E4E8">;</span></span>
+<span class="line"><span style="color:#E1E4E8">        }</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#79B8FF">        self</span><span style="color:#F97583">.</span><span style="color:#B392F0">update_rng</span><span style="color:#E1E4E8">();</span></span>
+<span class="line"><span style="color:#F97583">        let</span><span style="color:#E1E4E8"> event </span><span style="color:#F97583">=</span><span style="color:#F97583"> match</span><span style="color:#E1E4E8"> event_type {</span></span>
+<span class="line"><span style="color:#B392F0">            SwarmEventType</span><span style="color:#F97583">::</span><span style="color:#B392F0">ExecutorEvent</span><span style="color:#F97583"> =></span><span style="color:#E1E4E8"> {</span></span>
+<span class="line"><span style="color:#F97583">                let</span><span style="color:#E1E4E8"> executor_event </span><span style="color:#F97583">=</span><span style="color:#79B8FF"> self</span><span style="color:#F97583">.</span><span style="color:#E1E4E8">executor</span><span style="color:#F97583">.</span><span style="color:#B392F0">step_until</span><span style="color:#E1E4E8">(tick);</span></span>
+<span class="line"><span style="color:#F97583">                match</span><span style="color:#E1E4E8"> executor_event {</span></span>
+<span class="line"><span style="color:#B392F0">                    Some</span><span style="color:#E1E4E8">(</span><span style="color:#B392F0">MockExecutorEvent</span><span style="color:#F97583">::</span><span style="color:#B392F0">Event</span><span style="color:#E1E4E8">(event)) </span><span style="color:#F97583">=></span><span style="color:#E1E4E8"> {</span></span>
+<span class="line"><span style="color:#F97583">                        let</span><span style="color:#E1E4E8"> event_clone </span><span style="color:#F97583">=</span><span style="color:#E1E4E8"> event</span><span style="color:#F97583">.</span><span style="color:#B392F0">lossy_clone</span><span style="color:#E1E4E8">();</span></span>
+<span class="line"><span style="color:#F97583">                        let</span><span style="color:#E1E4E8"> commands </span><span style="color:#F97583">=</span><span style="color:#79B8FF"> self</span><span style="color:#F97583">.</span><span style="color:#E1E4E8">state</span><span style="color:#F97583">.</span><span style="color:#B392F0">update</span><span style="color:#E1E4E8">(event);</span></span>
+<span class="line"><span style="color:#79B8FF">                        self</span><span style="color:#F97583">.</span><span style="color:#E1E4E8">executor</span><span style="color:#F97583">.</span><span style="color:#B392F0">exec</span><span style="color:#E1E4E8">(commands);</span></span>
+<span class="line"><span style="color:#E1E4E8">                        (tick, event_clone)</span></span>
+<span class="line"><span style="color:#E1E4E8">                    }</span></span>
+<span class="line"><span style="color:#B392F0">                    Some</span><span style="color:#E1E4E8">(</span><span style="color:#B392F0">MockExecutorEvent</span><span style="color:#F97583">::</span><span style="color:#B392F0">Send</span><span style="color:#E1E4E8">(to, serialized)) </span><span style="color:#F97583">=></span><span style="color:#E1E4E8"> {</span></span>
+<span class="line"><span style="color:#E1E4E8">                        emitted_messages</span><span style="color:#F97583">.</span><span style="color:#B392F0">push</span><span style="color:#E1E4E8">(</span><span style="color:#B392F0">LinkMessage</span><span style="color:#E1E4E8"> { from</span><span style="color:#F97583">:</span><span style="color:#79B8FF"> self</span><span style="color:#F97583">.</span><span style="color:#E1E4E8">id, to, serialized });</span></span>
+<span class="line"><span style="color:#F97583">                        continue</span><span style="color:#E1E4E8">;</span></span>
+<span class="line"><span style="color:#E1E4E8">                    }</span></span>
+<span class="line"><span style="color:#B392F0">                    None</span><span style="color:#F97583"> =></span><span style="color:#F97583"> continue</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">                }</span></span>
+<span class="line"><span style="color:#E1E4E8">            }</span></span>
+<span class="line"><span style="color:#6A737D">            // timer and inbound-message cases omitted</span></span>
+<span class="line"><span style="color:#E1E4E8">        };</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#F97583">        return</span><span style="color:#B392F0"> Some</span><span style="color:#E1E4E8">(event);</span></span>
+<span class="line"><span style="color:#E1E4E8">    }</span></span>
+<span class="line"><span style="color:#B392F0">    None</span></span>
+<span class="line"><span style="color:#E1E4E8">}</span></span></code></pre>
+<p>That is why the simulator is valuable: it mocks the environment, not the core state-machine contract.</p>
 <h2 id="145-monad-twins-and-monad-randomized-tests-push-harder-on-bad-schedules">14.5 <code>monad-twins</code> And <code>monad-randomized-tests</code> Push Harder On Bad Schedules<a class="heading-anchor" aria-label="Link to this section" href="#145-monad-twins-and-monad-randomized-tests-push-harder-on-bad-schedules">#</a></h2>
 <p>Two more <code>monad-bft</code> surfaces matter a lot.</p>
 <h3 id="monad-twins"><code>monad-twins</code><a class="heading-anchor" aria-label="Link to this section" href="#monad-twins">#</a></h3>
 <p><code>monad-twins</code> is for adversarial cases where one logical validator identity effectively appears in several places at once. It is especially useful for equivocation-like scenarios, partitions, reconnection behavior, and proving that safety does not silently depend on an unrealistically clean network.</p>
 <h3 id="monad-randomized-tests"><code>monad-randomized-tests</code><a class="heading-anchor" aria-label="Link to this section" href="#monad-randomized-tests">#</a></h3>
 <p><code>monad-randomized-tests</code> uses a numeric seed and iterates over registered randomized cases. That is valuable because many consensus failures are not one obvious invariant bug — they are one unfortunate interleaving that a hand-written scenario never happened to cover. The binary also writes <code>tests_results.xml</code>, which makes seeded random runs easier to plug into automation when needed.</p>
+<p>Abridged from production code. The important detail is that twins scenarios are data-driven and include expected-failure cases:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="rust"><code><span class="line"><span style="color:#F97583">const</span><span style="color:#79B8FF"> TWIN_DEFAULT_SEED</span><span style="color:#F97583">:</span><span style="color:#B392F0"> u64</span><span style="color:#F97583"> =</span><span style="color:#79B8FF"> 1</span><span style="color:#E1E4E8">;</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#E1E4E8">#[test_case(</span><span style="color:#9ECBFF">"./tests/happy_path.json"</span><span style="color:#E1E4E8">; </span><span style="color:#9ECBFF">"happy_path"</span><span style="color:#E1E4E8">)]</span></span>
+<span class="line"><span style="color:#E1E4E8">#[test_case(</span><span style="color:#9ECBFF">"./tests/one_twin.json"</span><span style="color:#E1E4E8">; </span><span style="color:#9ECBFF">"one_twin"</span><span style="color:#E1E4E8">)]</span></span>
+<span class="line"><span style="color:#E1E4E8">#[test_case(</span><span style="color:#9ECBFF">"./tests/one_twin_partition.json"</span><span style="color:#E1E4E8">; </span><span style="color:#9ECBFF">"one_twin_partition"</span><span style="color:#E1E4E8">)]</span></span>
+<span class="line"><span style="color:#E1E4E8">#[test_case(</span><span style="color:#9ECBFF">"./tests/make_progress.json"</span><span style="color:#E1E4E8">; </span><span style="color:#9ECBFF">"make_progress"</span><span style="color:#E1E4E8">)]</span></span>
+<span class="line"><span style="color:#F97583">fn</span><span style="color:#B392F0"> twins_testing</span><span style="color:#E1E4E8">(path</span><span style="color:#F97583">:</span><span style="color:#F97583"> &#x26;</span><span style="color:#B392F0">str</span><span style="color:#E1E4E8">) {</span></span>
+<span class="line"><span style="color:#F97583">    let</span><span style="color:#E1E4E8"> test_case </span><span style="color:#F97583">=</span><span style="color:#B392F0"> read_twins_test</span><span style="color:#F97583">::</span><span style="color:#E1E4E8">&#x3C;</span><span style="color:#B392F0">MonadMessageNoSerSwarm</span><span style="color:#E1E4E8">>(path);</span></span>
+<span class="line"><span style="color:#B392F0">    run_twins_test</span><span style="color:#F97583">::</span><span style="color:#E1E4E8">&#x3C;_, _, _, </span><span style="color:#B392F0">MonadMessageNoSerSwarm</span><span style="color:#E1E4E8">>(</span><span style="color:#79B8FF">TWIN_DEFAULT_SEED</span><span style="color:#E1E4E8">, test_case)</span></span>
+<span class="line"><span style="color:#E1E4E8">}</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#E1E4E8">#[should_panic]</span></span>
+<span class="line"><span style="color:#E1E4E8">#[test_case(</span><span style="color:#9ECBFF">"./tests/too_much_twin.json"</span><span style="color:#E1E4E8">; </span><span style="color:#9ECBFF">"too_much_twin"</span><span style="color:#E1E4E8">)]</span></span>
+<span class="line"><span style="color:#E1E4E8">#[test_case(</span><span style="color:#9ECBFF">"./tests/too_much_twin_with_big_delay.json"</span><span style="color:#E1E4E8">; </span><span style="color:#9ECBFF">"too_much_twin_with_big_delay"</span><span style="color:#E1E4E8">)]</span></span>
+<span class="line"><span style="color:#E1E4E8">#[test_case(</span><span style="color:#9ECBFF">"./tests/mal_formed.json"</span><span style="color:#E1E4E8">; </span><span style="color:#9ECBFF">"mal_formed json"</span><span style="color:#E1E4E8">)]</span></span>
+<span class="line"><span style="color:#F97583">fn</span><span style="color:#B392F0"> twins_should_fail_testing</span><span style="color:#E1E4E8">(path</span><span style="color:#F97583">:</span><span style="color:#F97583"> &#x26;</span><span style="color:#B392F0">str</span><span style="color:#E1E4E8">) {</span></span>
+<span class="line"><span style="color:#F97583">    let</span><span style="color:#E1E4E8"> test_case </span><span style="color:#F97583">=</span><span style="color:#B392F0"> read_twins_test</span><span style="color:#F97583">::</span><span style="color:#E1E4E8">&#x3C;</span><span style="color:#B392F0">MonadMessageNoSerSwarm</span><span style="color:#E1E4E8">>(path);</span></span>
+<span class="line"><span style="color:#B392F0">    run_twins_test</span><span style="color:#F97583">::</span><span style="color:#E1E4E8">&#x3C;_, _, _, </span><span style="color:#B392F0">MonadMessageNoSerSwarm</span><span style="color:#E1E4E8">>(</span><span style="color:#79B8FF">TWIN_DEFAULT_SEED</span><span style="color:#E1E4E8">, test_case)</span></span>
+<span class="line"><span style="color:#E1E4E8">}</span></span></code></pre>
+<p>And randomized tests are registered and replayed by seed:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="rust"><code><span class="line"><span style="color:#F97583">pub</span><span style="color:#F97583"> struct</span><span style="color:#B392F0"> RandomizedTest</span><span style="color:#E1E4E8"> {</span></span>
+<span class="line"><span style="color:#F97583">    pub</span><span style="color:#E1E4E8"> name</span><span style="color:#F97583">:</span><span style="color:#F97583"> &#x26;</span><span style="color:#E1E4E8">'</span><span style="color:#B392F0">static</span><span style="color:#B392F0"> str</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#F97583">    pub</span><span style="color:#E1E4E8"> func</span><span style="color:#F97583">:</span><span style="color:#B392F0"> fn</span><span style="color:#E1E4E8">(</span><span style="color:#B392F0">u64</span><span style="color:#E1E4E8">),</span></span>
+<span class="line"><span style="color:#E1E4E8">}</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#F97583">for</span><span style="color:#E1E4E8"> t </span><span style="color:#F97583">in</span><span style="color:#B392F0"> inventory</span><span style="color:#F97583">::</span><span style="color:#B392F0">iter</span><span style="color:#F97583">::</span><span style="color:#E1E4E8">&#x3C;</span><span style="color:#B392F0">RandomizedTest</span><span style="color:#E1E4E8">> {</span></span>
+<span class="line"><span style="color:#F97583">    let</span><span style="color:#E1E4E8"> start </span><span style="color:#F97583">=</span><span style="color:#B392F0"> Instant</span><span style="color:#F97583">::</span><span style="color:#B392F0">now</span><span style="color:#E1E4E8">();</span></span>
+<span class="line"><span style="color:#F97583">    let</span><span style="color:#E1E4E8"> result </span><span style="color:#F97583">=</span><span style="color:#B392F0"> panic</span><span style="color:#F97583">::</span><span style="color:#B392F0">catch_unwind</span><span style="color:#E1E4E8">(</span><span style="color:#F97583">||</span><span style="color:#E1E4E8"> (t</span><span style="color:#F97583">.</span><span style="color:#E1E4E8">func)(seed));</span></span>
+<span class="line"><span style="color:#E1E4E8">    results</span><span style="color:#F97583">.</span><span style="color:#B392F0">insert</span><span style="color:#E1E4E8">(</span></span>
+<span class="line"><span style="color:#B392F0">        String</span><span style="color:#F97583">::</span><span style="color:#B392F0">from</span><span style="color:#E1E4E8">(t</span><span style="color:#F97583">.</span><span style="color:#E1E4E8">name),</span></span>
+<span class="line"><span style="color:#B392F0">        TestResults</span><span style="color:#E1E4E8"> {</span></span>
+<span class="line"><span style="color:#E1E4E8">            pass</span><span style="color:#F97583">:</span><span style="color:#E1E4E8"> result</span><span style="color:#F97583">.</span><span style="color:#B392F0">is_ok</span><span style="color:#E1E4E8">(),</span></span>
+<span class="line"><span style="color:#E1E4E8">            time</span><span style="color:#F97583">:</span><span style="color:#E1E4E8"> start</span><span style="color:#F97583">.</span><span style="color:#B392F0">elapsed</span><span style="color:#E1E4E8">(),</span></span>
+<span class="line"><span style="color:#E1E4E8">        },</span></span>
+<span class="line"><span style="color:#E1E4E8">    );</span></span>
+<span class="line"><span style="color:#E1E4E8">}</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#B392F0">summarize</span><span style="color:#E1E4E8">(seed, results)</span><span style="color:#F97583">?</span><span style="color:#E1E4E8">; </span><span style="color:#6A737D">// writes tests_results.xml</span></span></code></pre>
+<p>That gives bad schedules two important properties: they are adversarial enough to matter, and deterministic enough to reproduce.</p>
 <h2 id="146-monad-testground-and-monad-debugger-sit-between-unit-tests-and-operations">14.6 <code>monad-testground</code> And <code>monad-debugger</code> Sit Between Unit Tests And Operations<a class="heading-anchor" aria-label="Link to this section" href="#146-monad-testground-and-monad-debugger-sit-between-unit-tests-and-operations">#</a></h2>
 <p><code>monad-testground</code> and <code>monad-debugger</code> are worth calling out separately because they sit in a middle layer.</p>
 <h3 id="monad-testground"><code>monad-testground</code><a class="heading-anchor" aria-label="Link to this section" href="#monad-testground">#</a></h3>
@@ -93,8 +173,8 @@ View source →
 <h3 id="monad-debugger"><code>monad-debugger</code><a class="heading-anchor" aria-label="Link to this section" href="#monad-debugger">#</a></h3>
 <p><code>monad-debugger</code> is a browser-facing or WASM-facing simulation and visualization surface built on the same general simulator ideas. That continuity matters. It is not a separate hidden protocol implementation.</p>
 <h2 id="147-monad-bft-also-has-fuzzing-benchmarks-and-workflow-gates">14.7 <code>monad-bft</code> Also Has Fuzzing, Benchmarks, And Workflow Gates<a class="heading-anchor" aria-label="Link to this section" href="#147-monad-bft-also-has-fuzzing-benchmarks-and-workflow-gates">#</a></h2>
-<p>The public <code>monad-bft</code> workflow set shows which broad layers are currently visible in automation. The workflow names below are the public workflows visible in this checkout; they are a good map of what this repo exposes in CI here, not a claim that every validation path everywhere is listed.</p>
-<p>One reproducibility caveat applies to both repos: workflow files show what this checkout exposes as automated gates, not a promise that every gate is reproducible outside Category Labs infrastructure without the same runners, images, caches, and secrets.</p>
+<p>The public <code>monad-bft</code> workflow set shows which broad layers are currently visible in automation. The workflow names below are the public workflows visible in the source version reviewed here; they are a good map of what this repo exposes in CI here, not a claim that every validation path everywhere is listed.</p>
+<p>One reproducibility caveat applies to both repos: workflow files show what this source version exposes as automated gates, not a promise that every gate is reproducible outside Category Labs infrastructure without the same runners, images, caches, and secrets.</p>
 <h3 id="rustyml"><code>rust.yml</code><a class="heading-anchor" aria-label="Link to this section" href="#rustyml">#</a></h3>
 <p>The main Rust workflow currently runs things like:</p>
 <ul>
@@ -120,6 +200,45 @@ View source →
 <p>That means the execution repo is not only validating hand-written local examples. It is also validating itself against a broad external compatibility corpus. This is the main execution-spec regression suite in the repo.</p>
 <h3 id="what-this-layer-is-good-at">What This Layer Is Good At<a class="heading-anchor" aria-label="Link to this section" href="#what-this-layer-is-good-at">#</a></h3>
 <p>It is especially good at catching fork-specific EVM behavior mismatches, transaction and blockchain execution regressions, and unexpected incompatibilities with known Ethereum test fixtures. So when you ask “how do we know the execution engine still behaves like the intended EVM family?”, <code>test/ethereum_test</code> is one of the first answers.</p>
+<p>Abridged from production code. The important detail is that fixture compatibility is a registered CMake test matrix across forks:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="cmake"><code><span class="line"><span style="color:#E1E4E8">ExternalProject_Add(</span></span>
+<span class="line"><span style="color:#E1E4E8">  ExecutionSpecTestFixtures</span></span>
+<span class="line"><span style="color:#E1E4E8">  URL </span><span style="color:#9ECBFF">"https://github.com/ethereum/execution-spec-tests/releases/download/v5.4.0/fixtures_develop.tar.gz"</span></span>
+<span class="line"><span style="color:#E1E4E8">  URL_HASH </span><span style="color:#9ECBFF">"SHA256=3e2b02d49fe903eda4fd8caca5cbf0d139c470e97e1de9a85299b1b034f97099"</span></span>
+<span class="line"><span style="color:#E1E4E8">  CONFIGURE_COMMAND </span><span style="color:#9ECBFF">""</span></span>
+<span class="line"><span style="color:#F97583">  BUILD_COMMAND</span><span style="color:#9ECBFF"> ""</span></span>
+<span class="line"><span style="color:#E1E4E8">  INSTALL_COMMAND </span><span style="color:#9ECBFF">""</span><span style="color:#E1E4E8">)</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#F97583">add_executable</span><span style="color:#E1E4E8">(monad-ethereum-</span><span style="color:#F97583">test</span><span style="color:#E1E4E8">)</span></span>
+<span class="line"><span style="color:#F97583">target_link_libraries</span><span style="color:#E1E4E8">(monad-ethereum-</span><span style="color:#F97583">test</span><span style="color:#B392F0"> PRIVATE</span></span>
+<span class="line"><span style="color:#E1E4E8">  nlohmann_json::nlohmann_json</span></span>
+<span class="line"><span style="color:#E1E4E8">  monad_execution</span></span>
+<span class="line"><span style="color:#E1E4E8">  GTest::gtest)</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#F97583">function</span><span style="color:#E1E4E8">(add_ethereum_test)</span></span>
+<span class="line"><span style="color:#F97583">  set</span><span style="color:#E1E4E8">(ONE_VALUE_ARGS FORK)</span></span>
+<span class="line"><span style="color:#E1E4E8">  cmake_parse_arguments(ADD_ETHEREUM_TEST </span><span style="color:#9ECBFF">""</span><span style="color:#9ECBFF"> "${ONE_VALUE_ARGS}"</span><span style="color:#9ECBFF"> ""</span><span style="color:#F97583"> ${ARGN}</span><span style="color:#E1E4E8">)</span></span>
+<span class="line"><span style="color:#F97583">  add_test</span><span style="color:#E1E4E8">(</span><span style="color:#F97583">NAME</span><span style="color:#F97583"> ${ADD_ETHEREUM_TEST_FORK}</span><span style="color:#E1E4E8">_monad_ethereum_test</span></span>
+<span class="line"><span style="color:#F97583">           COMMAND</span><span style="color:#E1E4E8"> monad-ethereum-</span><span style="color:#F97583">test</span></span>
+<span class="line"><span style="color:#E1E4E8">                   --fork </span><span style="color:#F97583">${ADD_ETHEREUM_TEST_FORK}</span></span>
+<span class="line"><span style="color:#E1E4E8">                   --record-exec-events</span></span>
+<span class="line"><span style="color:#E1E4E8">                   --gtest_filter=</span><span style="color:#F97583">${FILTER}</span><span style="color:#E1E4E8">)</span></span>
+<span class="line"><span style="color:#F97583">endfunction</span><span style="color:#E1E4E8">()</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#E1E4E8">add_ethereum_test(FORK homestead)</span></span>
+<span class="line"><span style="color:#E1E4E8">add_ethereum_test(FORK eip158)</span></span>
+<span class="line"><span style="color:#E1E4E8">add_ethereum_test(FORK eip150)</span></span>
+<span class="line"><span style="color:#E1E4E8">add_ethereum_test(FORK byzantium)</span></span>
+<span class="line"><span style="color:#E1E4E8">add_ethereum_test(FORK constantinoplefix)</span></span>
+<span class="line"><span style="color:#E1E4E8">add_ethereum_test(FORK istanbul)</span></span>
+<span class="line"><span style="color:#E1E4E8">add_ethereum_test(FORK berlin)</span></span>
+<span class="line"><span style="color:#E1E4E8">add_ethereum_test(FORK london)</span></span>
+<span class="line"><span style="color:#E1E4E8">add_ethereum_test(FORK paris)</span></span>
+<span class="line"><span style="color:#E1E4E8">add_ethereum_test(FORK shanghai)</span></span>
+<span class="line"><span style="color:#E1E4E8">add_ethereum_test(FORK cancun)</span></span>
+<span class="line"><span style="color:#E1E4E8">add_ethereum_test(FORK prague)</span></span>
+<span class="line"><span style="color:#E1E4E8">add_ethereum_test(FORK osaka)</span></span></code></pre>
+<p>This is not a few hand-written smoke tests. It is a fixture-driven compatibility surface wired into the execution build.</p>
 <h2 id="1410-targeted-c-tests-cover-monad-specific-execution-rules">14.10 Targeted C++ Tests Cover Monad-Specific Execution Rules<a class="heading-anchor" aria-label="Link to this section" href="#1410-targeted-c-tests-cover-monad-specific-execution-rules">#</a></h2>
 <p>The execution repo also has many narrower C++ test files under <code>category/</code>. Representative areas include <code>category/execution/ethereum/*_test.cpp</code>, <code>category/execution/monad/*_test.cpp</code>, <code>category/execution/monad/staking/test_read_valset.cpp</code>, <code>category/execution/monad/reserve_balance/reserve_balance_contract_test.cpp</code>, <code>category/rpc/monad_executor_test.cpp</code>, and <code>category/mpt/test/*</code>. This layer is where the repo exercises detailed local rules that are too specific for the large fixture suites.</p>
 <h3 id="a-few-examples">A Few Examples<a class="heading-anchor" aria-label="Link to this section" href="#a-few-examples">#</a></h3>

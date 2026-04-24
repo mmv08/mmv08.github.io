@@ -31,6 +31,29 @@ View source →
 <p>The execution repo’s own overview is useful here. Most execution code is built around one shared execution library core. In the build system, the CMake target is <code>monad_execution</code>, and it produces the <code>libmonad_execution</code> library file that every other execution surface links against. The execution repo’s overview refers to it by that file name, and this book follows the same convention.</p>
 <p>That matters because it explains why execution shows up in more than one runtime shape without changing ownership. The same execution-owned core is used in three modes: daemon mode (the stand-alone <code>monad</code> execution daemon), hosted mode (execution APIs loaded into Rust-side processes), and developer or test tooling inside the execution repo.</p>
 <p>So the correct picture is that the execution repo owns one execution library core, and that core can be consumed in several runtime modes. This is why repo boundary and process boundary are related but not identical in Monad.</p>
+<p>Abridged from production code. The important detail is that the daemon links a larger shared execution library:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="cmake"><code><span class="line"><span style="color:#6A737D"># CMakeLists.txt</span></span>
+<span class="line"><span style="color:#F97583">add_library</span><span style="color:#E1E4E8">(monad_execution)</span></span>
+<span class="line"><span style="color:#F97583">target_link_libraries</span><span style="color:#E1E4E8">(</span></span>
+<span class="line"><span style="color:#E1E4E8">  monad_execution</span></span>
+<span class="line"><span style="color:#B392F0">  PUBLIC</span><span style="color:#E1E4E8"> monad_core</span></span>
+<span class="line"><span style="color:#E1E4E8">         monad_async</span></span>
+<span class="line"><span style="color:#E1E4E8">         monad_trie</span></span>
+<span class="line"><span style="color:#E1E4E8">         monad_execution_ethereum</span></span>
+<span class="line"><span style="color:#E1E4E8">         monad_execution_native</span></span>
+<span class="line"><span style="color:#E1E4E8">         monad_rpc</span></span>
+<span class="line"><span style="color:#E1E4E8">         monad_statesync</span></span>
+<span class="line"><span style="color:#E1E4E8">         monad-vm)</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#6A737D"># cmd/CMakeLists.txt</span></span>
+<span class="line"><span style="color:#F97583">add_executable</span><span style="color:#E1E4E8">(</span></span>
+<span class="line"><span style="color:#E1E4E8">  monad</span></span>
+<span class="line"><span style="color:#E1E4E8">  monad/main.cpp</span></span>
+<span class="line"><span style="color:#E1E4E8">  monad/runloop_monad.cpp</span></span>
+<span class="line"><span style="color:#E1E4E8">  monad/runloop_monad_ethblocks.cpp)</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#F97583">target_link_libraries</span><span style="color:#E1E4E8">(monad </span><span style="color:#B392F0">PRIVATE</span><span style="color:#E1E4E8"> monad_execution CLI11::CLI11)</span></span></code></pre>
+<p>That makes the runtime split less mysterious: <code>monad</code> the executable is an assembly surface over <code>libmonad_execution</code>.</p>
 <h2 id="63-there-is-more-than-one-boundary">6.3 There Is More Than One Boundary<a class="heading-anchor" aria-label="Link to this section" href="#63-there-is-more-than-one-boundary">#</a></h2>
 <p>Several different boundaries exist at once.</p>
 
@@ -103,6 +126,31 @@ View source →
 <span class="line"><span style="color:#E1E4E8">    RPC -->|live subscriptions| Ring</span></span></code></pre>
 <p>The direction matters: consensus makes an ordered block exist first, execution consumes that ordered block later, and read paths consume execution outputs after that. This is the process-level version of delayed execution.</p>
 <p>One run-loop detail is useful before reading <code>cmd/monad/runloop_monad.cpp</code>: when execution is behind, it walks finalized ledger history first. When it is caught up, it can also follow the proposed head. That is why execution can produce fresh proposed outputs while still respecting finalized canonical history.</p>
+<p>Abridged from production code. The important detail is that the execution daemon’s CLI names the storage, state-sync, and optional live-event surfaces:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="cpp"><code><span class="line"><span style="color:#E1E4E8">cli.</span><span style="color:#B392F0">add_option</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">"--chain"</span><span style="color:#E1E4E8">, chain_config, </span><span style="color:#9ECBFF">"select which chain config to run"</span><span style="color:#E1E4E8">)</span></span>
+<span class="line"><span style="color:#F97583">    -></span><span style="color:#B392F0">required</span><span style="color:#E1E4E8">();</span></span>
+<span class="line"><span style="color:#E1E4E8">cli.</span><span style="color:#B392F0">add_option</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">"--block-db,--block_db"</span><span style="color:#E1E4E8">, block_db_path, </span><span style="color:#9ECBFF">"block_db directory"</span><span style="color:#E1E4E8">)</span></span>
+<span class="line"><span style="color:#F97583">    -></span><span style="color:#B392F0">required</span><span style="color:#E1E4E8">();</span></span>
+<span class="line"><span style="color:#E1E4E8">cli.</span><span style="color:#B392F0">add_option</span><span style="color:#E1E4E8">(</span><span style="color:#9ECBFF">"--db"</span><span style="color:#E1E4E8">, dbname_paths, </span><span style="color:#9ECBFF">"database paths"</span><span style="color:#E1E4E8">);</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#E1E4E8">group-></span><span style="color:#B392F0">add_option</span><span style="color:#E1E4E8">(</span></span>
+<span class="line"><span style="color:#9ECBFF">    "--statesync"</span><span style="color:#E1E4E8">, statesync, </span><span style="color:#9ECBFF">"socket for statesync communication"</span><span style="color:#E1E4E8">);</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#B392F0">CLI</span><span style="color:#E1E4E8">::Option </span><span style="color:#F97583">const</span><span style="color:#F97583"> *const</span><span style="color:#E1E4E8"> exec_event_ring_option </span><span style="color:#F97583">=</span></span>
+<span class="line"><span style="color:#E1E4E8">    cli.</span><span style="color:#B392F0">add_option</span><span style="color:#E1E4E8">(</span></span>
+<span class="line"><span style="color:#9ECBFF">           "--exec-event-ring"</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#E1E4E8">           exec_event_ring_config,</span></span>
+<span class="line"><span style="color:#9ECBFF">           "execution event ring configuration string"</span><span style="color:#E1E4E8">)</span></span>
+<span class="line"><span style="color:#F97583">        -></span><span style="color:#B392F0">expected</span><span style="color:#E1E4E8">(</span><span style="color:#79B8FF">0</span><span style="color:#E1E4E8">, </span><span style="color:#79B8FF">1</span><span style="color:#E1E4E8">);</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#F97583">if</span><span style="color:#E1E4E8"> (exec_event_ring_option-></span><span style="color:#B392F0">count</span><span style="color:#E1E4E8">() </span><span style="color:#F97583">></span><span style="color:#79B8FF"> 0</span><span style="color:#E1E4E8">) {</span></span>
+<span class="line"><span style="color:#F97583">    if</span><span style="color:#E1E4E8"> (</span><span style="color:#B392F0">empty</span><span style="color:#E1E4E8">(exec_event_ring_config)) {</span></span>
+<span class="line"><span style="color:#E1E4E8">        exec_event_ring_config </span><span style="color:#F97583">=</span><span style="color:#E1E4E8"> MONAD_EVENT_DEFAULT_EXEC_FILE_NAME;</span></span>
+<span class="line"><span style="color:#E1E4E8">    }</span></span>
+<span class="line"><span style="color:#F97583">    auto</span><span style="color:#E1E4E8"> config </span><span style="color:#F97583">=</span><span style="color:#B392F0"> try_parse_event_ring_config</span><span style="color:#E1E4E8">(exec_event_ring_config);</span></span>
+<span class="line"><span style="color:#B392F0">    init_execution_event_recorder</span><span style="color:#E1E4E8">(</span><span style="color:#B392F0">std</span><span style="color:#E1E4E8">::</span><span style="color:#B392F0">move</span><span style="color:#E1E4E8">(</span><span style="color:#F97583">*</span><span style="color:#E1E4E8">config));</span></span>
+<span class="line"><span style="color:#E1E4E8">}</span></span></code></pre>
+<p>The event ring is therefore an optional configured output path, not an unconditional property of every execution daemon run.</p>
 <h2 id="68-one-transaction-across-the-boundary">6.8 One Transaction Across The Boundary<a class="heading-anchor" aria-label="Link to this section" href="#68-one-transaction-across-the-boundary">#</a></h2>
 <p>It helps to watch one transaction cross the ownership lines.</p>
 <pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="mermaid"><code><span class="line"><span style="color:#E1E4E8">sequenceDiagram</span></span>
@@ -126,6 +174,120 @@ View source →
 <span class="line"><span style="color:#E1E4E8">    RPC->>DB: answer later retained reads</span></span>
 <span class="line"><span style="color:#E1E4E8">    RPC->>Ring: push subscriptions</span></span></code></pre>
 <p>A few important consequences fall out of this flow. RPC does not directly mutate consensus state, the execution daemon does not decide ordering, and later reads usually come from triedb or the event ring rather than the ledger.</p>
+<p>Abridged from production code. The important details are that execution consumes a BFT header/body, derives sender context, validates cheap structure first, runs EVM execution, commits triedb state, then validates the output header it produced. The tracer setup and parent-cache lookup are compressed here so the boundary order stays visible:</p>
+<pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="cpp"><code><span class="line"><span style="color:#B392F0">Result</span><span style="color:#E1E4E8">&#x3C;</span><span style="color:#B392F0">BlockExecOutput</span><span style="color:#E1E4E8">> </span><span style="color:#B392F0">propose_block</span><span style="color:#E1E4E8">(</span></span>
+<span class="line"><span style="color:#79B8FF">    bytes32_t</span><span style="color:#F97583"> const</span><span style="color:#F97583"> &#x26;</span><span style="color:#FFAB70">block_id</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#B392F0">    MonadConsensusBlockHeader</span><span style="color:#F97583"> const</span><span style="color:#F97583"> &#x26;</span><span style="color:#FFAB70">consensus_header</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#B392F0">    Block</span><span style="color:#FFAB70"> block</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#B392F0">    BlockHashChain</span><span style="color:#F97583"> &#x26;</span><span style="color:#FFAB70">block_hash_chain</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#B392F0">    MonadChain</span><span style="color:#F97583"> const</span><span style="color:#F97583"> &#x26;</span><span style="color:#FFAB70">chain</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#B392F0">    DbCache</span><span style="color:#F97583"> &#x26;</span><span style="color:#FFAB70">db</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#B392F0">    vm</span><span style="color:#E1E4E8">::</span><span style="color:#B392F0">VM</span><span style="color:#F97583"> &#x26;</span><span style="color:#FFAB70">vm</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#B392F0">    fiber</span><span style="color:#E1E4E8">::</span><span style="color:#B392F0">PriorityPool</span><span style="color:#F97583"> &#x26;</span><span style="color:#FFAB70">priority_pool</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#F97583">    bool</span><span style="color:#F97583"> const</span><span style="color:#FFAB70"> is_first_block</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#F97583">    bool</span><span style="color:#F97583"> const</span><span style="color:#FFAB70"> enable_tracing</span><span style="color:#E1E4E8">,</span></span>
+<span class="line"><span style="color:#B392F0">    BlockCache</span><span style="color:#F97583"> &#x26;</span><span style="color:#FFAB70">block_cache</span><span style="color:#E1E4E8">)</span></span>
+<span class="line"><span style="color:#E1E4E8">{</span></span>
+<span class="line"><span style="color:#F97583">    auto</span><span style="color:#F97583"> const</span><span style="color:#F97583"> &#x26;</span><span style="color:#E1E4E8">block_hash_buffer </span><span style="color:#F97583">=</span></span>
+<span class="line"><span style="color:#E1E4E8">        block_hash_chain.</span><span style="color:#B392F0">find_chain</span><span style="color:#E1E4E8">(consensus_header.</span><span style="color:#B392F0">parent_id</span><span style="color:#E1E4E8">());</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#B392F0">    BOOST_OUTCOME_TRY</span><span style="color:#E1E4E8">(</span><span style="color:#B392F0">static_validate_consensus_header</span><span style="color:#E1E4E8">(consensus_header));</span></span>
+<span class="line"><span style="color:#B392F0">    BOOST_OUTCOME_TRY</span><span style="color:#E1E4E8">(</span><span style="color:#B392F0">static_validate_block</span><span style="color:#E1E4E8">&#x3C;</span><span style="color:#B392F0">traits</span><span style="color:#E1E4E8">>(chain, block));</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#F97583">    auto</span><span style="color:#F97583"> const</span><span style="color:#E1E4E8"> recovered_senders </span><span style="color:#F97583">=</span></span>
+<span class="line"><span style="color:#B392F0">        recover_senders</span><span style="color:#E1E4E8">(block.transactions, priority_pool);</span></span>
+<span class="line"><span style="color:#F97583">    auto</span><span style="color:#F97583"> const</span><span style="color:#E1E4E8"> recovered_authorities </span><span style="color:#F97583">=</span></span>
+<span class="line"><span style="color:#B392F0">        recover_authorities</span><span style="color:#E1E4E8">(block.transactions, priority_pool);</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#B392F0">    std</span><span style="color:#E1E4E8">::vector</span><span style="color:#F97583">&#x3C;</span><span style="color:#E1E4E8">Address</span><span style="color:#F97583">></span><span style="color:#B392F0"> senders</span><span style="color:#E1E4E8">(block.transactions.</span><span style="color:#B392F0">size</span><span style="color:#E1E4E8">());</span></span>
+<span class="line"><span style="color:#F97583">    for</span><span style="color:#E1E4E8"> (</span><span style="color:#F97583">unsigned</span><span style="color:#E1E4E8"> i </span><span style="color:#F97583">=</span><span style="color:#79B8FF"> 0</span><span style="color:#E1E4E8">; i </span><span style="color:#F97583">&#x3C;</span><span style="color:#E1E4E8"> recovered_senders.</span><span style="color:#B392F0">size</span><span style="color:#E1E4E8">(); </span><span style="color:#F97583">++</span><span style="color:#E1E4E8">i) {</span></span>
+<span class="line"><span style="color:#F97583">        if</span><span style="color:#E1E4E8"> (recovered_senders[i].</span><span style="color:#B392F0">has_value</span><span style="color:#E1E4E8">()) {</span></span>
+<span class="line"><span style="color:#E1E4E8">            senders[i] </span><span style="color:#F97583">=</span><span style="color:#E1E4E8"> recovered_senders[i].</span><span style="color:#B392F0">value</span><span style="color:#E1E4E8">();</span></span>
+<span class="line"><span style="color:#E1E4E8">        }</span></span>
+<span class="line"><span style="color:#F97583">        else</span><span style="color:#E1E4E8"> {</span></span>
+<span class="line"><span style="color:#F97583">            return</span><span style="color:#B392F0"> TransactionError</span><span style="color:#E1E4E8">::MissingSender;</span></span>
+<span class="line"><span style="color:#E1E4E8">        }</span></span>
+<span class="line"><span style="color:#E1E4E8">    }</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#F97583">    auto</span><span style="color:#E1E4E8"> senders_and_authorities </span><span style="color:#F97583">=</span></span>
+<span class="line"><span style="color:#B392F0">        combine_senders_and_authorities</span><span style="color:#E1E4E8">(senders, recovered_authorities);</span></span>
+<span class="line"><span style="color:#E1E4E8">    block_cache.</span><span style="color:#B392F0">emplace</span><span style="color:#E1E4E8">(</span></span>
+<span class="line"><span style="color:#E1E4E8">        block_id,</span></span>
+<span class="line"><span style="color:#E1E4E8">        BlockCacheEntry{</span></span>
+<span class="line"><span style="color:#E1E4E8">            .block_number </span><span style="color:#F97583">=</span><span style="color:#E1E4E8"> block.header.number,</span></span>
+<span class="line"><span style="color:#E1E4E8">            .parent_id </span><span style="color:#F97583">=</span><span style="color:#E1E4E8"> consensus_header.</span><span style="color:#B392F0">parent_id</span><span style="color:#E1E4E8">(),</span></span>
+<span class="line"><span style="color:#E1E4E8">            .senders_and_authorities </span><span style="color:#F97583">=</span><span style="color:#B392F0"> std</span><span style="color:#E1E4E8">::</span><span style="color:#B392F0">move</span><span style="color:#E1E4E8">(senders_and_authorities)});</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#B392F0">    BOOST_OUTCOME_TRY</span><span style="color:#E1E4E8">(</span></span>
+<span class="line"><span style="color:#B392F0">        static_validate_monad_body</span><span style="color:#E1E4E8">&#x3C;</span><span style="color:#B392F0">traits</span><span style="color:#E1E4E8">>(senders, block.transactions));</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#B392F0">    std</span><span style="color:#E1E4E8">::vector</span><span style="color:#F97583">&#x3C;</span><span style="color:#B392F0">std</span><span style="color:#E1E4E8">::vector</span><span style="color:#F97583">&#x3C;</span><span style="color:#E1E4E8">CallFrame</span><span style="color:#F97583">>></span><span style="color:#E1E4E8"> call_frames{block.transactions.</span><span style="color:#B392F0">size</span><span style="color:#E1E4E8">()};</span></span>
+<span class="line"><span style="color:#B392F0">    std</span><span style="color:#E1E4E8">::vector</span><span style="color:#F97583">&#x3C;</span><span style="color:#B392F0">std</span><span style="color:#E1E4E8">::unique_ptr</span><span style="color:#F97583">&#x3C;</span><span style="color:#E1E4E8">CallTracerBase</span><span style="color:#F97583">>></span><span style="color:#E1E4E8"> call_tracers{</span></span>
+<span class="line"><span style="color:#E1E4E8">        block.transactions.</span><span style="color:#B392F0">size</span><span style="color:#E1E4E8">()};</span></span>
+<span class="line"><span style="color:#B392F0">    std</span><span style="color:#E1E4E8">::vector</span><span style="color:#F97583">&#x3C;</span><span style="color:#B392F0">std</span><span style="color:#E1E4E8">::unique_ptr</span><span style="color:#F97583">&#x3C;</span><span style="color:#B392F0">trace</span><span style="color:#E1E4E8">::StateTracer</span><span style="color:#F97583">>></span><span style="color:#E1E4E8"> state_tracers{</span></span>
+<span class="line"><span style="color:#E1E4E8">        block.transactions.</span><span style="color:#B392F0">size</span><span style="color:#E1E4E8">()};</span></span>
+<span class="line"><span style="color:#6A737D">    // The full function fills one call tracer and one state tracer per tx here.</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#F97583">    auto</span><span style="color:#F97583"> const</span></span>
+<span class="line"><span style="color:#F97583">        &#x26;</span><span style="color:#E1E4E8">[grandparent_senders_and_authorities,</span></span>
+<span class="line"><span style="color:#E1E4E8">          parent_senders_and_authorities] </span><span style="color:#F97583">=</span><span style="color:#E1E4E8"> [</span><span style="color:#F97583">&#x26;</span><span style="color:#E1E4E8">] {</span></span>
+<span class="line"><span style="color:#F97583">            if</span><span style="color:#E1E4E8"> (block.header.number </span><span style="color:#F97583">></span><span style="color:#79B8FF"> 1</span><span style="color:#E1E4E8">) {</span></span>
+<span class="line"><span style="color:#79B8FF">                bytes32_t</span><span style="color:#F97583"> const</span><span style="color:#F97583"> &#x26;</span><span style="color:#E1E4E8">parent_id </span><span style="color:#F97583">=</span><span style="color:#E1E4E8"> consensus_header.</span><span style="color:#B392F0">parent_id</span><span style="color:#E1E4E8">();</span></span>
+<span class="line"><span style="color:#E1E4E8">                BlockCacheEntry </span><span style="color:#F97583">const</span><span style="color:#F97583"> &#x26;</span><span style="color:#E1E4E8">parent_entry </span><span style="color:#F97583">=</span><span style="color:#E1E4E8"> block_cache.</span><span style="color:#B392F0">at</span><span style="color:#E1E4E8">(parent_id);</span></span>
+<span class="line"><span style="color:#F97583">                if</span><span style="color:#E1E4E8"> (block.header.number </span><span style="color:#F97583">></span><span style="color:#79B8FF"> 2</span><span style="color:#E1E4E8">) {</span></span>
+<span class="line"><span style="color:#79B8FF">                    bytes32_t</span><span style="color:#F97583"> const</span><span style="color:#F97583"> &#x26;</span><span style="color:#E1E4E8">grandparent_id </span><span style="color:#F97583">=</span><span style="color:#E1E4E8"> parent_entry.parent_id;</span></span>
+<span class="line"><span style="color:#E1E4E8">                    BlockCacheEntry </span><span style="color:#F97583">const</span><span style="color:#F97583"> &#x26;</span><span style="color:#E1E4E8">grandparent_entry </span><span style="color:#F97583">=</span></span>
+<span class="line"><span style="color:#E1E4E8">                        block_cache.</span><span style="color:#B392F0">at</span><span style="color:#E1E4E8">(grandparent_id);</span></span>
+<span class="line"><span style="color:#F97583">                    return</span><span style="color:#B392F0"> std</span><span style="color:#E1E4E8">::tuple{</span></span>
+<span class="line"><span style="color:#E1E4E8">                        grandparent_entry.senders_and_authorities,</span></span>
+<span class="line"><span style="color:#E1E4E8">                        parent_entry.senders_and_authorities};</span></span>
+<span class="line"><span style="color:#E1E4E8">                }</span></span>
+<span class="line"><span style="color:#F97583">                return</span><span style="color:#B392F0"> std</span><span style="color:#E1E4E8">::tuple{</span></span>
+<span class="line"><span style="color:#E1E4E8">                    empty_senders_and_authorities,</span></span>
+<span class="line"><span style="color:#E1E4E8">                    parent_entry.senders_and_authorities};</span></span>
+<span class="line"><span style="color:#E1E4E8">            }</span></span>
+<span class="line"><span style="color:#F97583">            return</span><span style="color:#B392F0"> std</span><span style="color:#E1E4E8">::tuple{</span></span>
+<span class="line"><span style="color:#E1E4E8">                empty_senders_and_authorities, empty_senders_and_authorities};</span></span>
+<span class="line"><span style="color:#E1E4E8">        }();</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#E1E4E8">    ChainContext</span><span style="color:#F97583">&#x3C;</span><span style="color:#E1E4E8">traits</span><span style="color:#F97583">></span><span style="color:#F97583"> const</span><span style="color:#E1E4E8"> chain_context{</span></span>
+<span class="line"><span style="color:#E1E4E8">        .grandparent_senders_and_authorities </span><span style="color:#F97583">=</span><span style="color:#E1E4E8"> grandparent_senders_and_authorities,</span></span>
+<span class="line"><span style="color:#E1E4E8">        .parent_senders_and_authorities </span><span style="color:#F97583">=</span><span style="color:#E1E4E8"> parent_senders_and_authorities,</span></span>
+<span class="line"><span style="color:#E1E4E8">        .senders_and_authorities </span><span style="color:#F97583">=</span><span style="color:#E1E4E8"> block_cache.</span><span style="color:#B392F0">at</span><span style="color:#E1E4E8">(block_id).senders_and_authorities,</span></span>
+<span class="line"><span style="color:#E1E4E8">        .senders </span><span style="color:#F97583">=</span><span style="color:#E1E4E8"> senders,</span></span>
+<span class="line"><span style="color:#E1E4E8">        .authorities </span><span style="color:#F97583">=</span><span style="color:#E1E4E8"> recovered_authorities,</span></span>
+<span class="line"><span style="color:#E1E4E8">    };</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#E1E4E8">    BlockExecOutput exec_output;</span></span>
+<span class="line"><span style="color:#E1E4E8">    BlockMetrics block_metrics;</span></span>
+<span class="line"><span style="color:#E1E4E8">    BlockState </span><span style="color:#B392F0">block_state</span><span style="color:#E1E4E8">(db, vm);</span></span>
+<span class="line"><span style="color:#B392F0">    BOOST_OUTCOME_TRY</span><span style="color:#E1E4E8">(</span><span style="color:#F97583">auto</span><span style="color:#F97583"> const</span><span style="color:#E1E4E8"> results, </span><span style="color:#B392F0">execute_block</span><span style="color:#E1E4E8">&#x3C;</span><span style="color:#B392F0">traits</span><span style="color:#E1E4E8">>(</span></span>
+<span class="line"><span style="color:#E1E4E8">        chain, block, senders, recovered_authorities, block_state,</span></span>
+<span class="line"><span style="color:#E1E4E8">        block_hash_buffer, priority_pool.</span><span style="color:#B392F0">fiber_group</span><span style="color:#E1E4E8">(), block_metrics,</span></span>
+<span class="line"><span style="color:#E1E4E8">        call_tracers, state_tracers, chain_context));</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#F97583">    auto</span><span style="color:#E1E4E8"> [state, code] </span><span style="color:#F97583">=</span><span style="color:#B392F0"> std</span><span style="color:#E1E4E8">::</span><span style="color:#B392F0">move</span><span style="color:#E1E4E8">(block_state).</span><span style="color:#B392F0">release</span><span style="color:#E1E4E8">();</span></span>
+<span class="line"><span style="color:#E1E4E8">    CommitBuilder </span><span style="color:#B392F0">builder</span><span style="color:#E1E4E8">(block.header.number);</span></span>
+<span class="line"><span style="color:#E1E4E8">    builder.</span><span style="color:#B392F0">add_state_deltas</span><span style="color:#E1E4E8">(</span><span style="color:#F97583">*</span><span style="color:#E1E4E8">state)</span></span>
+<span class="line"><span style="color:#E1E4E8">        .</span><span style="color:#B392F0">add_code</span><span style="color:#E1E4E8">(code)</span></span>
+<span class="line"><span style="color:#E1E4E8">        .</span><span style="color:#B392F0">add_receipts</span><span style="color:#E1E4E8">(results)</span></span>
+<span class="line"><span style="color:#E1E4E8">        .</span><span style="color:#B392F0">add_transactions</span><span style="color:#E1E4E8">(block.transactions, senders)</span></span>
+<span class="line"><span style="color:#E1E4E8">        .</span><span style="color:#B392F0">add_call_frames</span><span style="color:#E1E4E8">(call_frames);</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#E1E4E8">    db.</span><span style="color:#B392F0">commit</span><span style="color:#E1E4E8">(block_id, builder, block.header, </span><span style="color:#F97583">*</span><span style="color:#E1E4E8">state, [</span><span style="color:#F97583">&#x26;</span><span style="color:#E1E4E8">](</span><span style="color:#B392F0">BlockHeader</span><span style="color:#F97583"> &#x26;</span><span style="color:#FFAB70">h</span><span style="color:#E1E4E8">) {</span></span>
+<span class="line"><span style="color:#E1E4E8">        h.receipts_root </span><span style="color:#F97583">=</span><span style="color:#E1E4E8"> db.</span><span style="color:#B392F0">receipts_root</span><span style="color:#E1E4E8">();</span></span>
+<span class="line"><span style="color:#E1E4E8">        h.state_root </span><span style="color:#F97583">=</span><span style="color:#E1E4E8"> db.</span><span style="color:#B392F0">state_root</span><span style="color:#E1E4E8">();</span></span>
+<span class="line"><span style="color:#E1E4E8">        h.transactions_root </span><span style="color:#F97583">=</span><span style="color:#E1E4E8"> db.</span><span style="color:#B392F0">transactions_root</span><span style="color:#E1E4E8">();</span></span>
+<span class="line"><span style="color:#E1E4E8">        h.gas_used </span><span style="color:#F97583">=</span><span style="color:#E1E4E8"> results.</span><span style="color:#B392F0">empty</span><span style="color:#E1E4E8">() </span><span style="color:#F97583">?</span><span style="color:#79B8FF"> 0</span><span style="color:#F97583"> :</span><span style="color:#E1E4E8"> results.</span><span style="color:#B392F0">back</span><span style="color:#E1E4E8">().gas_used;</span></span>
+<span class="line"><span style="color:#E1E4E8">    });</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#E1E4E8">    exec_output.eth_header </span><span style="color:#F97583">=</span><span style="color:#E1E4E8"> db.</span><span style="color:#B392F0">read_eth_header</span><span style="color:#E1E4E8">();</span></span>
+<span class="line"><span style="color:#B392F0">    BOOST_OUTCOME_TRY</span><span style="color:#E1E4E8">(</span></span>
+<span class="line"><span style="color:#B392F0">        validate_live_execution_outputs</span><span style="color:#E1E4E8">(block.header, exec_output.eth_header));</span></span>
+<span class="line"></span>
+<span class="line"><span style="color:#F97583">    return</span><span style="color:#E1E4E8"> exec_output;</span></span>
+<span class="line"><span style="color:#E1E4E8">}</span></span></code></pre>
+<p>This is the execution boundary in miniature: consensus supplies the ordered input, execution owns the state transition and output publication.</p>
 <h2 id="69-what-each-consumption-mode-can-and-cannot-do">6.9 What Each Consumption Mode Can And Cannot Do<a class="heading-anchor" aria-label="Link to this section" href="#69-what-each-consumption-mode-can-and-cannot-do">#</a></h2>
 <p>This table is a good sanity check.</p>
 
