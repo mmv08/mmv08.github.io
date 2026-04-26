@@ -34,6 +34,7 @@ They are the grammar the rest of the client speaks.</p>
 <li>protocol decode is only safe if length and integer bounds are enforced early</li>
 </ul>
 <p>So the point of this chapter is not just to meet the types. It is to see what bug each type is preventing.</p>
+<p>Read the chapter as a short ladder. Clocks locate a statement in protocol time. Identities say which object or validator the statement is about. Stake says how much weight the statement carries. Hashes make objects nameable. Signing domains make signatures non-reusable across message kinds. Decode bounds keep hostile input from becoming unbounded work. Later consensus code combines those pieces over and over.</p>
 <h2 id="11-the-three-main-clocks">1.1 The Three Main Clocks<a class="heading-anchor" aria-label="Link to this section" href="#11-the-three-main-clocks">#</a></h2>
 <p>The most important types in this chapter are the three clocks introduced in the introduction.</p>
 
@@ -233,6 +234,7 @@ The point is that history begins with precise typed anchors instead of informal 
 <p>The important detail is that the domain is chosen at the type level. A vote and a timeout can serialize similar-looking payload fields, but they are signed under different domains.</p>
 <h2 id="110-two-signature-roles-not-one">1.10 Two Signature Roles, Not One<a class="heading-anchor" aria-label="Link to this section" href="#110-two-signature-roles-not-one">#</a></h2>
 <p>This distinction is easy to miss, and later consensus types get much easier to read once you keep the two roles separate. Consensus uses two broad signature roles: one outer authorship signature role, and one certificate-style statement signature role.</p>
+<p>The reason for the split is that “this node sent a message” and “this validator contributed to a threshold proof” are different claims. A network message needs an author. A QC, TC, or NEC needs many validators signing the same protocol statement. Keeping those roles separate lets the code verify ordinary message authorship without confusing it with stake-weighted certificate evidence.</p>
 <h3 id="outer-signatures">Outer Signatures<a class="heading-anchor" aria-label="Link to this section" href="#outer-signatures">#</a></h3>
 <p>The outer signature role answers “who sent this network message?” and “who signed this tip as the original block-round leader?” In the generic code, this is the <code>ST</code> side.</p>
 <p>As a concrete example, a <code>ProposalMessage</code> carries a signed <code>ConsensusTip</code>, and that outer signature says the original block-round leader authored this tip.</p>
