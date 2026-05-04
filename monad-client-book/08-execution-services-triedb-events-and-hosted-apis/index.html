@@ -5,10 +5,10 @@ View source →
 <p>Around triedb, Rust uses both narrow and broad adapters. The execution <em>event ring</em> is a shared-memory ring buffer. The execution daemon writes the freshest execution events into it, and Rust-side consumers read those events without blocking either side.</p>
 <p>Hosted execution APIs such as <code>eth_call</code> round out the list. <code>eth_call</code> is the Ethereum JSON-RPC method for running a contract function in a sandboxed read-only call, without sending a real transaction. This chapter explains why not every “latest” answer comes from the same place.</p>
 <h2 id="why-this-chapter-matters">Why This Chapter Matters<a class="heading-anchor" aria-label="Link to this section" href="#why-this-chapter-matters">#</a></h2>
-<p>Engineers new to the codebase usually make one incorrect assumption first: that there is one database that answers everything. That is not how the node works. Recent execution state, freshest recent events, and long-term historical block data live on different surfaces and are consumed through different adapters. Once that clicks, the RPC chapter becomes much easier.</p>
+<p>There is no single database that answers everything in the node. Recent execution state, freshest recent events, and long-term historical block data live on different surfaces and are consumed through different adapters. The RPC chapter depends on this split.</p>
 <p>If you only inspect one Rust module first, inspect <code>DataProvider</code> in <code>monad-rpc/src/data/mod.rs</code>. It is the narrowest place where recent buffers, triedb, and archive composition become concrete.</p>
 <h2 id="81-three-read-surfaces-not-one">8.1 Three Read Surfaces, Not One<a class="heading-anchor" aria-label="Link to this section" href="#81-three-read-surfaces-not-one">#</a></h2>
-<p>The cleanest starting table is this one:</p>
+<p>The three surfaces compare like this:</p>
 
 
 
@@ -35,7 +35,6 @@ View source →
 
 
 <table><thead><tr><th>Surface</th><th>What it is best at</th><th>What it is not</th></tr></thead><tbody><tr><td>triedb</td><td>retained recent execution state and recent block-associated execution data</td><td>infinite historical state</td></tr><tr><td>event ring</td><td>freshest live execution updates</td><td>durable retained state</td></tr><tr><td>archive</td><td>older blocks, receipts, traces, and indexes</td><td>general old-world-state reconstruction</td></tr></tbody></table>
-<p>The rest of the chapter makes that table concrete.</p>
 <p>The archive row is especially important for RPC. Archive data can extend block, receipt, log, trace, and index history, but it is not a replacement for triedb-backed account and storage state reads.</p>
 <h2 id="82-triedb-is-the-durable-recent-execution-database">8.2 Triedb Is The Durable Recent Execution Database<a class="heading-anchor" aria-label="Link to this section" href="#82-triedb-is-the-durable-recent-execution-database">#</a></h2>
 <p>Triedb is the answer to questions like “what is the current retained balance of this account?”, “what code is currently at this address?”, “what recent receipt belongs to this transaction?”, and “what recent header belongs to this hash?”</p>
@@ -143,24 +142,24 @@ View source →
 <p>RPC needs a richer read surface than consensus, so it uses a richer adapter. <code>TriedbEnv</code> does more than expose point reads: it maintains latest finalized, voted, and proposed block metadata, runs a polling path that keeps those keys fresh, and holds small hot-object caches.</p>
 <p>That makes the division clean. <code>TriedbReader</code> is the narrow consensus-facing surface; <code>TriedbEnv</code> is the broader RPC-facing surface. This is why not every triedb consumer sees the same interface even though the underlying database is the same.</p>
 <h2 id="85-hosted-eth_call-is-its-own-execution-path">8.5 Hosted <code>eth_call</code> Is Its Own Execution Path<a class="heading-anchor" aria-label="Link to this section" href="#85-hosted-eth_call-is-its-own-execution-path">#</a></h2>
-<p><code>eth_call</code> is the hosted execution service that makes this boundary easiest to see. The execution repo exposes a dedicated RPC executor interface under <code>category/rpc/monad_executor.*</code>, and on the Rust side, <code>monad-rpc</code> wraps it through <code>EthCallHandler</code>. That handler is configured with separate pools such as a low-gas pool, a high-gas pool, and block-oriented context resolution, and it also applies concurrency backpressure.</p>
-<p>So <code>eth_call</code> is not best understood as a thin synchronous foreign-function call from Rust into C++. It is better understood as a hosted execution subsystem with its own scheduling and result-shaping concerns.</p>
+<p><code>eth_call</code> is one prominent example of this boundary. The execution repo exposes a dedicated RPC executor interface under <code>category/rpc/monad_executor.*</code>, and on the Rust side, <code>monad-rpc</code> wraps it through <code>EthCallHandler</code>. That handler is configured with separate pools such as a low-gas pool, a high-gas pool, and block-oriented context resolution, and it also applies concurrency backpressure.</p>
+<p>So <code>eth_call</code> is not a thin synchronous foreign-function call from Rust into C++. It is a hosted execution subsystem with its own scheduling and result-shaping concerns.</p>
 <h2 id="86-the-event-ring-is-a-live-stream-not-a-database">8.6 The Event Ring Is A Live Stream, Not A Database<a class="heading-anchor" aria-label="Link to this section" href="#86-the-event-ring-is-a-live-stream-not-a-database">#</a></h2>
-<p>The execution event ring is the freshest output surface. At a high level, the execution daemon publishes events into a shared ring, and Rust-side code subscribes to those events. This is the right surface for subscriptions, very recent block or receipt visibility, and recent event buffering. It is not the durable recent database. That distinction is a mental model the later RPC chapter depends on.</p>
+<p>The execution event ring is the freshest output surface. At a high level, the execution daemon publishes events into a shared ring, and Rust-side code subscribes to those events. The ring is the surface for subscriptions, very recent block or receipt visibility, and recent event buffering. It is not the durable recent database.</p>
 <h2 id="87-live-stream-guarantees-fresh-but-gap-sensitive">8.7 Live-Stream Guarantees: Fresh, But Gap-Sensitive<a class="heading-anchor" aria-label="Link to this section" href="#87-live-stream-guarantees-fresh-but-gap-sensitive">#</a></h2>
 <p>The event ring is not only fresher than triedb. It is also gap-sensitive.</p>
-<p>In current code, WebSocket handlers treat <code>Gap</code> as fatal for that subscription stream, WebSocket handlers also close when they lag the broadcast channel badly enough, and <code>ExecEventsBuffer</code> itself ignores <code>Gap</code> on insert because it is only a recent cache, not a replay protocol. So the event ring should be understood as a live feed, not a durable canonical replay log. That distinction matters a lot for subscription reasoning.</p>
-<p>The background cache task that populates the recent buffer also logs broadcast lag and keeps running. That is another reason to read the buffer as a best-effort freshness cache rather than proof of continuous event history.</p>
+<p>In current code, WebSocket handlers treat <code>Gap</code> as fatal for that subscription stream, WebSocket handlers also close when they lag the broadcast channel badly enough, and <code>ExecEventsBuffer</code> itself ignores <code>Gap</code> on insert because it is only a recent cache, not a replay protocol. So the event ring is a live feed, not a durable canonical replay log. That distinction shapes subscription reasoning.</p>
+<p>The background cache task that populates the recent buffer also logs broadcast lag and keeps running. The buffer is a best-effort freshness cache, not proof of continuous event history.</p>
 <blockquote>
-<p><strong>Read the buffer narrowly</strong>
+<p><strong>What the gap-ignore behavior means</strong>
 <code>ExecEventsBuffer</code> ignoring <code>Gap</code> means “keep the freshest cache entries you still have.”
 It does not mean the node proved continuity of the stream.</p>
 </blockquote>
 <h2 id="88-execeventsbuffer-is-one-bounded-in-memory-cache">8.8 <code>ExecEventsBuffer</code> Is One Bounded In-Memory Cache<a class="heading-anchor" aria-label="Link to this section" href="#88-execeventsbuffer-is-one-bounded-in-memory-cache">#</a></h2>
-<p>The event buffer in <code>monad-rpc</code> is easy to describe incorrectly. It is not one proposed database plus one voted database plus one finalized database. It is one bounded in-memory recent buffer, keyed by block height, block hash, and tx hash, plus three latest-height trackers for proposed, voted, and finalized.</p>
+<p>The event buffer in <code>monad-rpc</code> is not one proposed database plus one voted database plus one finalized database. It is one bounded in-memory recent buffer, keyed by block height, block hash, and tx hash, plus three latest-height trackers for proposed, voted, and finalized.</p>
 <h3 id="what-happens-on-insert">What Happens On Insert<a class="heading-anchor" aria-label="Link to this section" href="#what-happens-on-insert">#</a></h3>
 <p>When a new block event arrives, the buffer ignores <code>Verified</code> events entirely. It updates the latest proposed/voted/finalized atomics, stores the full recent block by height, stores the block-hash-to-height lookup, and stores the tx-hash-to-receipt location lookup.</p>
-<p><code>Verified</code> means execution output for an older block has been included in a finalized later block. That is useful event-stream information, but it is not one of the three head markers this cache maintains. If another block later arrives at the same height, the old same-height block can be replaced. That tells you what this buffer is: a bounded recent live cache, not a stable historical store.</p>
+<p><code>Verified</code> means execution output for an older block has been included in a finalized later block. That is useful event-stream information, but it is not one of the three head markers this cache maintains. If another block later arrives at the same height, the old same-height block can be replaced. The buffer is a bounded recent live cache, not a stable historical store.</p>
 <p>In the main RPC startup path in this source version, that bounded recent cache is constructed with capacity <code>1024</code>.</p>
 <p>Abridged from production code. The important details are the three latest-height atomics and the fact that <code>Verified</code> is ignored by this buffer:</p>
 <pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="rust"><code><span class="line"><span style="color:#F97583">pub</span><span style="color:#F97583"> struct</span><span style="color:#B392F0"> ExecEventsBuffer</span><span style="color:#E1E4E8"> {</span></span>
@@ -230,9 +229,9 @@ It does not mean the node proved continuity of the stream.</p>
 <span class="line"><span style="color:#B392F0">        BlockTags</span><span style="color:#F97583">::</span><span style="color:#B392F0">Number</span><span style="color:#E1E4E8">(n) </span><span style="color:#F97583">=></span><span style="color:#E1E4E8"> n</span><span style="color:#F97583">.</span><span style="color:#79B8FF">0</span><span style="color:#E1E4E8">,</span></span>
 <span class="line"><span style="color:#E1E4E8">    }</span></span>
 <span class="line"><span style="color:#E1E4E8">}</span></span></code></pre>
-<p>This code is why the chapter keeps <code>proposed</code>, <code>voted</code>, <code>finalized</code>, and <code>verified</code> separate. Only three of those are head trackers here.</p>
+<p><code>proposed</code>, <code>voted</code>, <code>finalized</code>, and <code>verified</code> are not interchangeable. Only three of those are head trackers here.</p>
 <h2 id="89-triedb-versus-event-ring">8.9 Triedb Versus Event Ring<a class="heading-anchor" aria-label="Link to this section" href="#89-triedb-versus-event-ring">#</a></h2>
-<p>This is the shortest reliable comparison:</p>
+<p>Each common RPC question maps to a different best source:</p>
 
 
 
@@ -274,21 +273,16 @@ It does not mean the node proved continuity of the stream.</p>
 </ul>
 <p>In the main RPC startup path, it is constructed like this:</p>
 <pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="rust"><code><span class="line"><span style="color:#F97583">let</span><span style="color:#E1E4E8"> data_provider </span><span style="color:#F97583">=</span><span style="color:#E1E4E8"> triedb_env</span><span style="color:#F97583">.</span><span style="color:#B392F0">map</span><span style="color:#E1E4E8">(</span><span style="color:#F97583">|</span><span style="color:#E1E4E8">t</span><span style="color:#F97583">|</span><span style="color:#B392F0"> DataProvider</span><span style="color:#F97583">::</span><span style="color:#B392F0">new</span><span style="color:#E1E4E8">(event_buffer, t, archive_reader));</span></span></code></pre>
-<p>That wording matters.</p>
 <blockquote>
 <p><strong>Current code</strong>
 In the main RPC startup path, the combined <code>DataProvider</code> exists only when triedb exists.</p>
-</blockquote>
-<blockquote>
-<p><strong>Runtime assembly fact</strong>
-This is true of the main <code>monad-rpc</code> wiring in this source version.</p>
 </blockquote>
 <blockquote>
 <p><strong>Current caveat</strong>
 The type itself can still be constructed directly in tests with mock triedb-like implementations, so this is not a type-system impossibility.</p>
 </blockquote>
 <h2 id="811-popular-rpc-methods-map-to-different-backing-surfaces">8.11 Popular RPC Methods Map To Different Backing Surfaces<a class="heading-anchor" aria-label="Link to this section" href="#811-popular-rpc-methods-map-to-different-backing-surfaces">#</a></h2>
-<p>One explicit matrix is worth keeping handy.</p>
+<p>The current method-to-surface mapping:</p>
 
 
 
@@ -327,9 +321,9 @@ The type itself can still be constructed directly in tests with mock triedb-like
 
 
 <table><thead><tr><th>Method or query shape</th><th>Main path today</th></tr></thead><tbody><tr><td><code>eth_blockNumber</code></td><td>triedb metadata only; latest proposed height from triedb</td></tr><tr><td><code>eth_getBalance</code></td><td>triedb only; no general archive fallback for old state</td></tr><tr><td><code>eth_getCode</code></td><td>triedb only; no general archive fallback for old code</td></tr><tr><td><code>eth_getTransactionReceipt</code></td><td><code>ExecEventsBuffer</code> -> triedb -> archive</td></tr><tr><td><code>eth_getTransactionByHash</code></td><td><code>ExecEventsBuffer</code> -> triedb -> archive</td></tr><tr><td><code>eth_getLogs</code></td><td>recent path from buffer or triedb, older path may use archive indexes as prefilter and archive receipts as truth</td></tr><tr><td><code>eth_call</code></td><td><code>TriedbEnv</code> resolves block context, then hosted execution runs</td></tr></tbody></table>
-<p>That table is one of the quickest ways to replace the vague phrase “the RPC database” with specific read paths.</p>
+<p>There is no single “RPC database” — different methods read from different surfaces.</p>
 <h2 id="812-why-eth_blocknumber-prefers-triedb">8.12 Why <code>eth_blockNumber</code> Prefers Triedb<a class="heading-anchor" aria-label="Link to this section" href="#812-why-eth_blocknumber-prefers-triedb">#</a></h2>
-<p>This specific example shows the design clearly. <code>DataProvider::get_latest_block_number()</code> returns triedb’s latest proposed block number, not the freshest event-buffer height.</p>
+<p><code>DataProvider::get_latest_block_number()</code> returns triedb’s latest proposed block number, not the freshest event-buffer height.</p>
 <p>The reason is consistency. A wallet that calls <code>eth_blockNumber</code> and then immediately calls <code>eth_getBalance</code> should land on a block context the server can actually answer authoritatively from its retained recent-state surface. So the client prefers a slightly less aggressive notion of latest over cross-method inconsistency.</p>
 <p>Abridged from production code. The comment says the design choice directly:</p>
 <pre class="astro-code github-dark" style="background-color:#24292e;color:#e1e4e8; overflow-x: auto;" tabindex="0" data-language="rust"><code><span class="line"><span style="color:#F97583">pub</span><span style="color:#F97583"> fn</span><span style="color:#B392F0"> get_latest_block_number</span><span style="color:#E1E4E8">(</span><span style="color:#F97583">&#x26;</span><span style="color:#79B8FF">self</span><span style="color:#E1E4E8">) </span><span style="color:#F97583">-></span><span style="color:#B392F0"> u64</span><span style="color:#E1E4E8"> {</span></span>
